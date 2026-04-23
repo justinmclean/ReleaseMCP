@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apache-incubator-releases-mcp"
+version = "0.1.0"
+description = "MCP server for checking Apache Incubator release artifacts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+keywords = ["apache", "incubator", "releases", "mcp"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "mcp>=1.0.0",
+]
+
+[project.scripts]
+incubator-releases-mcp = "apache_incubator_releases_mcp.protocol:main"
+apache-incubator-releases-mcp = "apache_incubator_releases_mcp.protocol:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+apache_incubator_releases_mcp = ["py.typed"]
+
+[project.optional-dependencies]
+test = [
+  "coverage>=7.0.0",
+]
+dev = [
+  "coverage>=7.0.0",
+  "mypy>=1.0.0",
+  "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_parser.py" = ["E402"]
+"tests/test_protocol.py" = ["E402"]
+"tests/test_tools.py" = ["E402"]
+"server.py" = ["E402"]
+
+[tool.coverage.run]
+source = ["apache_incubator_releases_mcp"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+check_untyped_defs = true
+no_implicit_optional = true
+pretty = true
