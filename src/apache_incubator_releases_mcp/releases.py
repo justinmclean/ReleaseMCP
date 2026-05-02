@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 
 DEFAULT_DIST_BASE = "https://dist.apache.org/repos/dist/release/incubator"
 DEFAULT_ARCHIVE_BASE = "https://archive.apache.org/dist/incubator"
@@ -40,6 +41,19 @@ class ReleaseFile:
     version: str | None = None
     last_modified: str | None = None
     size: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SourceStatus:
+    source: str
+    location: str
+    available: bool
+    transport: str
+    file_count: int
+    error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -158,9 +172,16 @@ def _file_from_path(path: Path, root: Path, source: str) -> ReleaseFile:
     )
 
 
-def _collect_local(root: Path, source: str, max_depth: int) -> list[ReleaseFile]:
+def _collect_local(root: Path, source: str, max_depth: int) -> tuple[list[ReleaseFile], SourceStatus]:
     if not root.exists():
-        return []
+        return [], SourceStatus(
+            source=source,
+            location=str(root.resolve()),
+            available=False,
+            transport="filesystem",
+            file_count=0,
+            error=f"Directory not found: {root.resolve()}",
+        )
     files: list[ReleaseFile] = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -168,25 +189,53 @@ def _collect_local(root: Path, source: str, max_depth: int) -> list[ReleaseFile]
         depth = len(path.relative_to(root).parts) - 1
         if depth <= max_depth:
             files.append(_file_from_path(path, root, source))
-    return files
+    return files, SourceStatus(
+        source=source,
+        location=str(root.resolve()),
+        available=True,
+        transport="filesystem",
+        file_count=len(files),
+    )
 
 
-def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = None) -> list[ReleaseFile]:
+def _url_error_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        return f"HTTP {exc.code} for {exc.url}"
+    if isinstance(exc, URLError):
+        return f"URL error: {exc.reason}"
+    return str(exc) or exc.__class__.__name__
+
+
+def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = None) -> tuple[list[ReleaseFile], SourceStatus]:
     seen = seen or set()
     if url in seen:
-        return []
+        return [], SourceStatus(
+            source=source,
+            location=url,
+            available=True,
+            transport="http",
+            file_count=0,
+        )
     seen.add(url)
     try:
         entries = _parse_listing_entries(_read_url_text(url))
-    except Exception:
-        return []
+    except Exception as exc:
+        return [], SourceStatus(
+            source=source,
+            location=url,
+            available=False,
+            transport="http",
+            file_count=0,
+            error=_url_error_message(exc),
+        )
     files: list[ReleaseFile] = []
     for entry in entries:
         href = str(entry["href"])
         full = urllib.parse.urljoin(url, href)
         if href.endswith("/"):
             if max_depth > 0:
-                files.extend(_collect_url(full, source, max_depth - 1, seen))
+                child_files, _ = _collect_url(full, source, max_depth - 1, seen)
+                files.extend(child_files)
             continue
         name = urllib.parse.unquote(Path(urllib.parse.urlparse(full).path).name)
         files.append(
@@ -202,7 +251,13 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
                 size=entry["size"],
             )
         )
-    return files
+    return files, SourceStatus(
+        source=source,
+        location=url,
+        available=True,
+        transport="http",
+        file_count=len(files),
+    )
 
 
 def collect_files(
@@ -218,16 +273,20 @@ def collect_files(
         "archive": _join_source(archive_base, slug),
     }
     files: list[ReleaseFile] = []
+    source_statuses: list[SourceStatus] = []
     for source, location in sources.items():
         if _is_url(location):
-            files.extend(_collect_url(location, source, max_depth))
+            source_files, status = _collect_url(location, source, max_depth)
         else:
-            files.extend(_collect_local(Path(location), source, max_depth))
+            source_files, status = _collect_local(Path(location), source, max_depth)
+        files.extend(source_files)
+        source_statuses.append(status)
     unique = {(item.source, item.location): item for item in files}
     return {
         "podling": podling,
         "podling_slug": slug,
         "sources": sources,
+        "source_statuses": [status.to_dict() for status in source_statuses],
         "count": len(unique),
         "files": [item.to_dict() for item in sorted(unique.values(), key=lambda item: item.location)],
     }

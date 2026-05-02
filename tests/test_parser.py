@@ -22,6 +22,8 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertGreaterEqual(result["count"], 6)
         self.assertIn("dist", result["sources"])
         self.assertIn("archive", result["sources"])
+        self.assertEqual(len(result["source_statuses"]), 2)
+        self.assertTrue(all(status["available"] for status in result["source_statuses"]))
 
     def test_podling_release_overview_pairs_sidecars_and_checks_disclaimer(self) -> None:
         with release_dirs() as (dist, archive):
@@ -34,6 +36,20 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertEqual(len(latest["signatures"]), 1)
         self.assertEqual(len(latest["checksums"]), 1)
         self.assertTrue(result["incubating_hints"]["disclaimer_checks"][0]["has_disclaimer_file"])
+
+    def test_collect_files_reports_missing_source_directory(self) -> None:
+        with release_dirs() as (dist, archive):
+            result = releases.collect_files(
+                "alpha",
+                dist_base=str(dist),
+                archive_base=str(archive.parent / "missing-archive-root"),
+            )
+
+        self.assertGreater(result["count"], 0)
+        statuses = {status["source"]: status for status in result["source_statuses"]}
+        self.assertTrue(statuses["dist"]["available"])
+        self.assertFalse(statuses["archive"]["available"])
+        self.assertIn("Directory not found", statuses["archive"]["error"])
 
 
 if __name__ == "__main__":

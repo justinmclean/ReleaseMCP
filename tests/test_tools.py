@@ -20,6 +20,7 @@ class ToolsTests(unittest.TestCase):
 
         self.assertEqual(result["podling_slug"], "alpha")
         self.assertEqual(result["source_artifact_count"], 2)
+        self.assertEqual(len(result["source_statuses"]), 2)
 
     def test_tools_registered_with_schemas(self) -> None:
         self.assertIn("podling_releases", tools.TOOLS)

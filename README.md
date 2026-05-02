@@ -98,6 +98,9 @@ These examples show prompts an IPMC member or mentor could type into an MCP clie
 
 Return release artifact, signature, checksum, cadence, and Incubator naming evidence for one Apache Incubator podling.
 
+The response also includes `source_statuses`, so callers can distinguish "no files found" from a source that could not
+be read.
+
 Arguments:
 
 - `podling`: podling id or name
