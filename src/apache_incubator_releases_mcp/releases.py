@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import tarfile
 import urllib.parse
@@ -14,6 +15,10 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_DIST_BASE = "https://dist.apache.org/repos/dist/release/incubator"
 DEFAULT_ARCHIVE_BASE = "https://archive.apache.org/dist/incubator"
+DEFAULT_GITHUB_API_BASE = "https://api.github.com/repos/apache"
+DEFAULT_DOCKER_API_BASE = "https://hub.docker.com/v2/repositories"
+DEFAULT_PYPI_API_BASE = "https://pypi.org/pypi"
+DISTRIBUTION_GUIDELINES_URL = "https://incubator.apache.org/guides/distribution.html"
 ARCHIVE_SUFFIXES = (
     ".tar.gz",
     ".tar.bz2",
@@ -28,6 +33,15 @@ VERSION_RE = re.compile(r"(?<!\d)v?(\d+(?:[._-]\d+)+(?:[-._][A-Za-z0-9]+)*)")
 HTML_HREF_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>(.*)', re.I)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}))?\b")
+UNAPPROVED_TAG_RE = re.compile(
+    r"(?:^|[-._\s])(?:rc\d*|candidate|nightly|snapshot|dev|master|main)(?:$|[-._\s])",
+    re.I,
+)
+PYPI_PRERELEASE_RE = re.compile(r"(?:a|b|rc|dev)\d*$", re.I)
+INCUBATOR_DISCLAIMER_RE = re.compile(
+    r"\bincubat(?:ing|or)\b.*\bdisclaimer\b|\bdisclaimer\b.*\bincubat(?:ing|or)\b",
+    re.I | re.S,
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +100,10 @@ def _read_url_text(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "apache-incubator-releases-mcp/0.1.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def _read_url_json(url: str) -> Any:
+    return json.loads(_read_url_text(url))
 
 
 def _parse_listing_entries(text: str) -> list[dict[str, str | None]]:
@@ -435,17 +453,380 @@ def incubating_hints(files: list[ReleaseFile]) -> dict[str, Any]:
     }
 
 
+def _contains_incubator_disclaimer(value: str | None) -> bool:
+    return bool(value and INCUBATOR_DISCLAIMER_RE.search(value))
+
+
+def _is_unapproved_label(value: str | None) -> bool:
+    return bool(value and UNAPPROVED_TAG_RE.search(value))
+
+
+def _is_pypi_prerelease(version: str | None) -> bool:
+    return bool(version and PYPI_PRERELEASE_RE.search(version.replace("-", "")))
+
+
+def _is_alv2_license(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = value.lower()
+    return "apache" in normalized and ("2.0" in normalized or "software license" in normalized)
+
+
+def _github_release_facts(project: str, github_api_base: str) -> dict[str, Any]:
+    url = f"{github_api_base.rstrip('/')}/{project}/releases"
+    try:
+        payload = _read_url_json(url)
+    except Exception as exc:
+        return {
+            "source": "github",
+            "location": url,
+            "available": False,
+            "error": _url_error_message(exc),
+            "releases": [],
+        }
+    if not isinstance(payload, list):
+        return {
+            "source": "github",
+            "location": url,
+            "available": False,
+            "error": "Unexpected GitHub releases response",
+            "releases": [],
+        }
+    releases = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        tag_name = str(item.get("tag_name") or "")
+        name = str(item.get("name") or "")
+        body = str(item.get("body") or "")
+        label = " ".join(part for part in (tag_name, name) if part)
+        releases.append(
+            {
+                "tag_name": tag_name or None,
+                "name": name or None,
+                "html_url": item.get("html_url"),
+                "draft": bool(item.get("draft")),
+                "prerelease": bool(item.get("prerelease")),
+                "published_at": item.get("published_at"),
+                "contains_incubator_disclaimer": _contains_incubator_disclaimer(body),
+                "looks_like_rc_nightly_snapshot_or_dev": _is_unapproved_label(label),
+            }
+        )
+    return {
+        "source": "github",
+        "location": url,
+        "available": True,
+        "release_count": len(releases),
+        "releases": releases,
+    }
+
+
+def _pypi_project_facts(package: str, pypi_api_base: str) -> dict[str, Any]:
+    url = f"{pypi_api_base.rstrip('/')}/{urllib.parse.quote(package)}/json"
+    try:
+        payload = _read_url_json(url)
+    except Exception as exc:
+        return {
+            "package": package,
+            "location": url,
+            "available": False,
+            "error": _url_error_message(exc),
+            "releases": [],
+        }
+    if not isinstance(payload, dict) or not isinstance(payload.get("info"), dict):
+        return {
+            "package": package,
+            "location": url,
+            "available": False,
+            "error": "Unexpected PyPI project response",
+            "releases": [],
+        }
+    info = payload["info"]
+    description = "\n".join(
+        str(info.get(key) or "") for key in ("summary", "description")
+    )
+    classifiers = [
+        str(item)
+        for item in info.get("classifiers") or []
+        if isinstance(item, str)
+    ]
+    releases_payload = payload.get("releases") or {}
+    releases = []
+    if isinstance(releases_payload, dict):
+        for version, files in releases_payload.items():
+            file_items = files if isinstance(files, list) else []
+            release_files = [
+                {
+                    "filename": str(item.get("filename") or ""),
+                    "packagetype": item.get("packagetype"),
+                    "python_version": item.get("python_version"),
+                    "upload_time_iso_8601": item.get("upload_time_iso_8601"),
+                    "has_digests": bool(item.get("digests")),
+                    "has_signature": bool(item.get("has_sig")),
+                    "yanked": bool(item.get("yanked")),
+                }
+                for item in file_items
+                if isinstance(item, dict)
+            ]
+            version_text = str(version)
+            releases.append(
+                {
+                    "version": version_text,
+                    "file_count": len(release_files),
+                    "files": release_files,
+                    "is_prerelease": _is_pypi_prerelease(version_text),
+                    "looks_like_rc_nightly_snapshot_or_dev": _is_unapproved_label(version_text),
+                    "all_files_have_digests": all(item["has_digests"] for item in release_files)
+                    if release_files
+                    else False,
+                    "any_file_has_signature": any(item["has_signature"] for item in release_files),
+                    "all_files_yanked": all(item["yanked"] for item in release_files)
+                    if release_files
+                    else False,
+                }
+            )
+    return {
+        "package": package,
+        "location": f"https://pypi.org/project/{urllib.parse.quote(package)}/",
+        "api_location": url,
+        "available": True,
+        "name": info.get("name"),
+        "version": info.get("version"),
+        "summary": info.get("summary"),
+        "license": info.get("license"),
+        "classifiers": classifiers,
+        "contains_incubator_disclaimer": _contains_incubator_disclaimer(description),
+        "license_is_alv2": _is_alv2_license(str(info.get("license") or ""))
+        or any(_is_alv2_license(item) for item in classifiers),
+        "latest_version_is_prerelease": _is_pypi_prerelease(str(info.get("version") or "")),
+        "latest_version_looks_unapproved": _is_unapproved_label(str(info.get("version") or "")),
+        "release_count": len(releases),
+        "releases": sorted(releases, key=lambda item: item["version"], reverse=True),
+    }
+
+
+def _docker_json(path: str, docker_api_base: str) -> Any:
+    return _read_url_json(f"{docker_api_base.rstrip('/')}/{path.lstrip('/')}")
+
+
+def _docker_repository_facts(image: str, docker_api_base: str) -> dict[str, Any]:
+    namespace, _, repository = image.partition("/")
+    if not namespace or not repository:
+        return {
+            "image": image,
+            "available": False,
+            "error": "Docker image must use namespace/repository form",
+            "tags": [],
+        }
+    repository_path = f"{namespace}/{repository}/"
+    location = f"{docker_api_base.rstrip('/')}/{repository_path}"
+    try:
+        metadata = _docker_json(repository_path, docker_api_base)
+        tag_payload = _docker_json(f"{repository_path}tags?page_size=100", docker_api_base)
+    except Exception as exc:
+        return {
+            "image": image,
+            "location": location,
+            "available": False,
+            "error": _url_error_message(exc),
+            "tags": [],
+        }
+    if not isinstance(metadata, dict) or not isinstance(tag_payload, dict):
+        return {
+            "image": image,
+            "location": location,
+            "available": False,
+            "error": "Unexpected Docker Hub response",
+            "tags": [],
+        }
+    overview = "\n".join(
+        str(metadata.get(key) or "") for key in ("description", "full_description")
+    )
+    tag_items = tag_payload.get("results") or []
+    tags = [
+        {
+            "name": str(item.get("name") or ""),
+            "last_updated": item.get("last_updated"),
+            "full_size": item.get("full_size"),
+            "looks_like_rc_nightly_snapshot_or_dev": _is_unapproved_label(
+                str(item.get("name") or "")
+            ),
+        }
+        for item in tag_items
+        if isinstance(item, dict)
+    ]
+    return {
+        "image": image,
+        "location": location,
+        "available": True,
+        "description": metadata.get("description"),
+        "contains_incubator_disclaimer": _contains_incubator_disclaimer(overview),
+        "tag_count": len(tags),
+        "tags": tags,
+        "latest_tag_present": any(item["name"] == "latest" for item in tags),
+    }
+
+
+def platform_distribution_checks(
+    podling: str,
+    *,
+    github_project: str | None = None,
+    docker_images: list[str] | None = None,
+    pypi_packages: list[str] | None = None,
+    github_api_base: str = DEFAULT_GITHUB_API_BASE,
+    docker_api_base: str = DEFAULT_DOCKER_API_BASE,
+    pypi_api_base: str = DEFAULT_PYPI_API_BASE,
+) -> dict[str, Any]:
+    slug = podling_slug(podling)
+    github_project = github_project or slug
+    docker_images = docker_images or [f"apache/{slug}", f"apache{slug}/{slug}"]
+    pypi_packages = pypi_packages or [f"apache-{slug}"]
+
+    github = _github_release_facts(github_project, github_api_base)
+    docker = [_docker_repository_facts(image, docker_api_base) for image in docker_images]
+    pypi = [_pypi_project_facts(package, pypi_api_base) for package in pypi_packages]
+
+    github_hints: list[str] = []
+    if not github["available"]:
+        github_hints.append(
+            "GitHub releases could not be inspected; "
+            "verify the apache/<project> release page manually."
+        )
+    elif github.get("releases"):
+        releases = github["releases"]
+        if any(not item["contains_incubator_disclaimer"] for item in releases):
+            github_hints.append(
+                "Some GitHub releases do not include visible incubation disclaimer text."
+            )
+        if any(
+            item["looks_like_rc_nightly_snapshot_or_dev"] and not item["prerelease"]
+            for item in releases
+        ):
+            github_hints.append(
+                "Some GitHub release candidates, nightlies, snapshots, or dev builds "
+                "are not marked as prereleases."
+            )
+        github_hints.append(
+            "Confirm any releases from before incubation are clearly described and tagged as such."
+        )
+    else:
+        github_hints.append(
+            "No GitHub release entries were found; GitHub tags may still need manual review."
+        )
+
+    docker_hints: list[str] = []
+    available_docker = [item for item in docker if item["available"]]
+    if not available_docker:
+        docker_hints.append(
+            "Docker Hub repositories could not be inspected; "
+            "verify apache/<project> or apache<project>/<project> manually."
+        )
+    for repository in available_docker:
+        image = repository["image"]
+        if not repository["contains_incubator_disclaimer"]:
+            docker_hints.append(
+                f"Docker Hub overview for {image} does not include visible "
+                "incubation disclaimer text."
+            )
+        if repository["latest_tag_present"]:
+            docker_hints.append(
+                f"Verify Docker Hub latest tag for {image} points only to "
+                "an IPMC-approved ASF release."
+            )
+        if any(item["looks_like_rc_nightly_snapshot_or_dev"] for item in repository["tags"]):
+            docker_hints.append(
+                f"Verify RC, nightly, snapshot, or dev Docker tags for {image} "
+                "are clearly labeled and not promoted as releases."
+            )
+        docker_hints.append(
+            f"Verify any Dockerfile for {image} includes an ASF header and "
+            "incubation disclaimer."
+        )
+
+    pypi_hints: list[str] = []
+    available_pypi = [item for item in pypi if item["available"]]
+    if not available_pypi:
+        pypi_hints.append(
+            "PyPI projects could not be inspected; verify apache-<project> manually."
+        )
+    for project in available_pypi:
+        package = project["package"]
+        if not project["contains_incubator_disclaimer"]:
+            pypi_hints.append(
+                f"PyPI project description for {package} does not include visible "
+                "incubation disclaimer text."
+            )
+        if not project["license_is_alv2"]:
+            pypi_hints.append(
+                f"PyPI metadata for {package} does not clearly display the ALv2 license."
+            )
+        if project["latest_version_is_prerelease"] or project["latest_version_looks_unapproved"]:
+            pypi_hints.append(
+                f"Verify PyPI latest version for {package} does not point to a release "
+                "candidate, nightly, snapshot, or dev build."
+            )
+        if any(
+            item["looks_like_rc_nightly_snapshot_or_dev"] and not item["is_prerelease"]
+            for item in project["releases"]
+        ):
+            pypi_hints.append(
+                f"Some PyPI RC, nightly, snapshot, or dev versions for {package} "
+                "do not look like PyPI pre-releases."
+            )
+        if any(not item["all_files_have_digests"] for item in project["releases"]):
+            pypi_hints.append(
+                f"Some PyPI files for {package} do not expose digest metadata."
+            )
+        if not any(
+            item["any_file_has_signature"]
+            for item in project["releases"]
+            if not item["all_files_yanked"]
+        ):
+            pypi_hints.append(
+                f"No non-yanked PyPI files for {package} expose signature metadata; "
+                "verify convenience artifacts are otherwise signed or verifiable."
+            )
+        pypi_hints.append(
+            f"Verify pip install {package} installs only artifacts made from "
+            "IPMC-approved ASF releases."
+        )
+
+    return {
+        "guidelines": DISTRIBUTION_GUIDELINES_URL,
+        "github": github,
+        "docker_hub": docker,
+        "pypi": pypi,
+        "hints": {
+            "github": github_hints,
+            "docker_hub": docker_hints,
+            "pypi": pypi_hints,
+        },
+    }
+
+
 def release_overview(
     podling: str,
     *,
     dist_base: str = DEFAULT_DIST_BASE,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
     max_depth: int = 1,
+    include_platforms: bool = False,
+    github_project: str | None = None,
+    docker_images: list[str] | None = None,
+    pypi_packages: list[str] | None = None,
+    github_api_base: str = DEFAULT_GITHUB_API_BASE,
+    docker_api_base: str = DEFAULT_DOCKER_API_BASE,
+    pypi_api_base: str = DEFAULT_PYPI_API_BASE,
 ) -> dict[str, Any]:
-    collected = collect_files(podling, dist_base=dist_base, archive_base=archive_base, max_depth=max_depth)
+    collected = collect_files(
+        podling,
+        dist_base=dist_base,
+        archive_base=archive_base,
+        max_depth=max_depth,
+    )
     files = [ReleaseFile(**item) for item in collected["files"]]
     groups = _release_groups(files)
-    return {
+    result = {
         **collected,
         "release_count": len(groups),
         "releases": groups,
@@ -455,3 +836,14 @@ def release_overview(
         "checksum_count": sum(1 for item in files if item.kind == "checksum"),
         "incubating_hints": incubating_hints(files),
     }
+    if include_platforms:
+        result["platform_distribution_checks"] = platform_distribution_checks(
+            podling,
+            github_project=github_project,
+            docker_images=docker_images,
+            pypi_packages=pypi_packages,
+            github_api_base=github_api_base,
+            docker_api_base=docker_api_base,
+            pypi_api_base=pypi_api_base,
+        )
+    return result

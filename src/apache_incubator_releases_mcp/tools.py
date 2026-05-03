@@ -46,6 +46,22 @@ def optional_depth(value: Any) -> int:
     return value
 
 
+def optional_bool(value: Any, key: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(f"'{key}' must be a boolean")
+    return value
+
+
+def optional_string_list(value: Any, key: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"'{key}' must be an array of strings")
+    return [require_non_empty_string(item, key) for item in value]
+
+
 def resolve_dist_base(value: str | None = None) -> str:
     return optional_string(value, "dist_base") or _CONFIGURED_DIST_BASE or releases.DEFAULT_DIST_BASE
 
@@ -59,6 +75,10 @@ def podling_releases(
     dist_base: str | None = None,
     archive_base: str | None = None,
     max_depth: int | None = None,
+    include_platforms: bool | None = None,
+    github_project: str | None = None,
+    docker_images: list[str] | None = None,
+    pypi_packages: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return release evidence for one Apache Incubator podling."""
     return releases.release_overview(
@@ -66,14 +86,19 @@ def podling_releases(
         dist_base=resolve_dist_base(dist_base),
         archive_base=resolve_archive_base(archive_base),
         max_depth=optional_depth(max_depth),
+        include_platforms=optional_bool(include_platforms, "include_platforms"),
+        github_project=optional_string(github_project, "github_project"),
+        docker_images=optional_string_list(docker_images, "docker_images"),
+        pypi_packages=optional_string_list(pypi_packages, "pypi_packages"),
     )
 
 
 TOOLS: dict[str, dict[str, Any]] = {
     "podling_releases": schemas.tool_definition(
         description=(
-            "Return release artifact, signature, checksum, cadence, and Incubator naming evidence "
-            "for one Apache Incubator podling."
+            "Return release artifact, signature, checksum, cadence, Incubator naming evidence, "
+            "and optional GitHub/Docker Hub/PyPI distribution checks for one Apache "
+            "Incubator podling."
         ),
         handler=podling_releases,
         properties=schemas.podling_release_properties(),

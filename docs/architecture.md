@@ -39,3 +39,7 @@ checksums. Cadence is derived from listing or filesystem modification dates when
 
 Incubating hints are intentionally evidence-oriented. The server checks whether source artifact names include
 `incubating`; when artifacts are local and inspectable, it also looks for a `DISCLAIMER` file inside source archives.
+
+Optional platform distribution checks inspect GitHub releases, Docker Hub repository metadata, and PyPI project metadata
+when callers pass `include_platforms`. These checks cite the ASF Incubator distribution guide and return observed
+platform facts separately from review hints, because several guideline items require human confirmation.

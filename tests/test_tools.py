@@ -28,6 +28,14 @@ class ToolsTests(unittest.TestCase):
             tools.TOOLS["podling_releases"]["inputSchema"]["properties"]["podling"]["type"],
             "string",
         )
+        self.assertEqual(
+            tools.TOOLS["podling_releases"]["inputSchema"]["properties"]["include_platforms"]["type"],
+            "boolean",
+        )
+        self.assertEqual(
+            tools.TOOLS["podling_releases"]["inputSchema"]["properties"]["pypi_packages"]["type"],
+            "array",
+        )
 
 
 if __name__ == "__main__":

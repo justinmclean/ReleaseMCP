@@ -16,6 +16,20 @@ MAX_DEPTH_PROPERTY = {
     "description": "Maximum traversal depth under the podling directory; defaults to 1",
 }
 BOOLEAN_PROPERTY = {"type": "boolean", "description": "Optional boolean flag"}
+GITHUB_PROJECT_PROPERTY = {
+    "type": "string",
+    "description": "Optional apache/<project> GitHub repository name; defaults to the podling slug",
+}
+DOCKER_IMAGES_PROPERTY = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Optional Docker Hub images in namespace/repository form",
+}
+PYPI_PACKAGES_PROPERTY = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Optional PyPI package names; defaults to apache-<podling>",
+}
 
 
 def input_schema(
@@ -49,4 +63,14 @@ def podling_release_properties() -> dict[str, Any]:
         "dist_base": DIST_BASE_PROPERTY,
         "archive_base": ARCHIVE_BASE_PROPERTY,
         "max_depth": MAX_DEPTH_PROPERTY,
+        "include_platforms": {
+            "type": "boolean",
+            "description": (
+                "Fetch optional GitHub, Docker Hub, and PyPI distribution evidence; "
+                "defaults to false"
+            ),
+        },
+        "github_project": GITHUB_PROJECT_PROPERTY,
+        "docker_images": DOCKER_IMAGES_PROPERTY,
+        "pypi_packages": PYPI_PACKAGES_PROPERTY,
     }
