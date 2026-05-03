@@ -105,7 +105,7 @@ class ReleaseParserTests(unittest.TestCase):
         original = releases._scan_url_page
 
         def fake_scan_url_page(url: str) -> tuple[list, str]:
-            if url == "https://alpha.apache.org/downloads.html":
+            if url == "https://alpha.apache.org/download/":
                 html_text = (
                     f"<html><body>"
                     f'<a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>'
@@ -126,31 +126,18 @@ class ReleaseParserTests(unittest.TestCase):
             releases._scan_url_page = original
 
         self.assertTrue(discovery["found"])
-        self.assertEqual(discovery["location"], "https://alpha.apache.org/downloads.html")
+        self.assertEqual(discovery["location"], "https://alpha.apache.org/download/")
 
-    def test_discovers_release_page_from_homepage_download_link(self) -> None:
+    def test_discovers_release_page_only_checks_standard_paths(self) -> None:
         with release_dirs() as (dist, archive):
             collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
             files = [releases.ReleaseFile(**item) for item in collected["files"]]
-        source = "apache-alpha-1.1.0-incubating-source-release.zip"
         original = releases._scan_url_page
+        attempted_urls: list[str] = []
 
         def fake_scan_url_page(url: str) -> tuple[list, str]:
-            if url == "https://alpha.apache.org/":
-                html_text = '<html><body><a href="/get-alpha.html">Downloads</a></body></html>'
-            elif url == "https://alpha.apache.org/get-alpha.html":
-                html_text = (
-                    f"<html><body>"
-                    f'<a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>'
-                    f'<a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>'
-                    f"</body></html>"
-                )
-            else:
-                raise OSError("not found")
-            s = releases._HtmlLinkScanner()
-            s.feed(html_text)
-            s.close()
-            return s.links, s.visible_text
+            attempted_urls.append(url)
+            raise OSError("not found")
 
         releases._scan_url_page = fake_scan_url_page
         try:
@@ -158,9 +145,10 @@ class ReleaseParserTests(unittest.TestCase):
         finally:
             releases._scan_url_page = original
 
-        self.assertTrue(discovery["found"])
-        self.assertEqual(discovery["location"], "https://alpha.apache.org/get-alpha.html")
-        self.assertIn("https://alpha.apache.org/", discovery["attempted"])
+        self.assertFalse(discovery["found"])
+        # Only standard path candidates — no homepage, no incubator subdomain
+        self.assertEqual(attempted_urls, [f"https://alpha.apache.org/{p}" for p in releases.RELEASE_PAGE_PATHS])
+        self.assertFalse(any("incubator.apache.org" in u for u in attempted_urls))
 
     def test_release_overview_checks_discovered_release_page(self) -> None:
         with release_dirs() as (dist, archive):
@@ -170,7 +158,7 @@ class ReleaseParserTests(unittest.TestCase):
         original_scan_url_page = releases._scan_url_page
 
         def fake_scan_url_page(url: str) -> tuple[list, str]:
-            if url == "https://alpha.apache.org/downloads.html":
+            if url == "https://alpha.apache.org/download/":
                 html_text = (
                     f"<html><body>"
                     f'<a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>'
@@ -198,51 +186,10 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertTrue(result["release_page_discovery"]["found"])
         self.assertEqual(
             result["release_page_checks"]["location"],
-            "https://alpha.apache.org/downloads.html",
+            "https://alpha.apache.org/download/",
         )
         self.assertFalse(result["release_page_checks"]["hints"])
 
-    def test_release_overview_uses_discovered_incubator_download_page_as_dist_source(self) -> None:
-        with release_dirs() as (_dist, archive):
-            source = "apache-resilientdb-1.0.0-incubating-source-release.zip"
-            original_scan_url_page = releases._scan_url_page
-
-            def fake_scan_url_page(url: str) -> tuple[list, str]:
-                if url == "https://resilientdb.incubator.apache.org/download.html":
-                    html_text = (
-                        f"<html><body>"
-                        f'<a href="https://www.apache.org/dyn/closer.lua/incubator/resilientdb/{source}">Source</a>'
-                        f'<a href="https://downloads.apache.org/incubator/resilientdb/{source}.asc">PGP</a>'
-                        f'<a href="https://downloads.apache.org/incubator/resilientdb/{source}.sha512">SHA512</a>'
-                        f'<a href="https://downloads.apache.org/incubator/resilientdb/KEYS">KEYS</a>'
-                        f" Please verify downloads with checksums and OpenPGP signatures."
-                        f"</body></html>"
-                    )
-                else:
-                    raise OSError("not found")
-                s = releases._HtmlLinkScanner()
-                s.feed(html_text)
-                s.close()
-                return s.links, s.visible_text
-
-            releases._scan_url_page = fake_scan_url_page
-            try:
-                result = releases.release_overview("resilientdb", archive_base=str(archive))
-            finally:
-                releases._scan_url_page = original_scan_url_page
-
-        self.assertEqual(
-            result["sources"]["dist"],
-            "https://resilientdb.incubator.apache.org/download.html",
-        )
-        self.assertTrue(result["release_page_discovery"]["found"])
-        self.assertEqual(result["source_artifact_count"], 1)
-        self.assertEqual(result["signature_count"], 1)
-        self.assertEqual(result["checksum_count"], 1)
-        self.assertEqual(
-            result["release_page_checks"]["location"],
-            "https://resilientdb.incubator.apache.org/download.html",
-        )
 
     def test_release_overview_without_dist_base_does_not_fall_back_to_default_svn_dist(self) -> None:
         with release_dirs() as (dist, archive):

@@ -813,12 +813,8 @@ def _is_release_page_candidate(
 
 def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[str, Any]:
     slug = podling_slug(podling)
-    base_urls = [f"https://{slug}.incubator.apache.org/", f"https://{slug}.apache.org/"]
-    candidates = [
-        urllib.parse.urljoin(base_url, path)
-        for base_url in base_urls
-        for path in RELEASE_PAGE_PATHS
-    ]
+    base_url = f"https://{slug}.apache.org/"
+    candidates = [urllib.parse.urljoin(base_url, path) for path in RELEASE_PAGE_PATHS]
     attempted: list[str] = []
     errors: dict[str, str] = {}
 
