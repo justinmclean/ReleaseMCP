@@ -912,7 +912,6 @@ def release_page_checks(
             "location": release_page_url,
             "available": False,
             "error": _url_error_message(exc),
-            "links": [],
             "facts": {},
             "hints": ["Release download page could not be inspected."],
         }
@@ -1022,7 +1021,6 @@ def release_page_checks(
         "guidelines": RELEASE_DOWNLOAD_PAGES_URL,
         "location": release_page_url,
         "available": True,
-        "links": links,
         "facts": facts,
         "hints": hints,
     }
@@ -1073,7 +1071,6 @@ def _github_release_facts(project: str, github_api_base: str) -> dict[str, Any]:
             continue
         tag_name = str(item.get("tag_name") or "")
         name = str(item.get("name") or "")
-        body = str(item.get("body") or "")
         label = " ".join(part for part in (tag_name, name) if part)
         releases.append(
             {
@@ -1083,7 +1080,7 @@ def _github_release_facts(project: str, github_api_base: str) -> dict[str, Any]:
                 "draft": bool(item.get("draft")),
                 "prerelease": bool(item.get("prerelease")),
                 "published_at": item.get("published_at"),
-                "contains_incubator_disclaimer": _contains_incubator_disclaimer(body),
+                "contains_incubator_disclaimer": _contains_incubator_disclaimer(str(item.get("body") or "")),
                 "looks_like_rc_nightly_snapshot_or_dev": _is_unapproved_label(label),
             }
         )
@@ -1126,40 +1123,27 @@ def _pypi_project_facts(package: str, pypi_api_base: str) -> dict[str, Any]:
         if isinstance(item, str)
     ]
     releases_payload = payload.get("releases") or {}
+    del payload  # free the full JSON dict; we've extracted everything we need
     releases = []
     if isinstance(releases_payload, dict):
         for version, files in releases_payload.items():
             file_items = files if isinstance(files, list) else []
-            release_files = [
-                {
-                    "filename": str(item.get("filename") or ""),
-                    "packagetype": item.get("packagetype"),
-                    "python_version": item.get("python_version"),
-                    "upload_time_iso_8601": item.get("upload_time_iso_8601"),
-                    "has_digests": bool(item.get("digests")),
-                    "has_signature": bool(item.get("has_sig")),
-                    "yanked": bool(item.get("yanked")),
-                }
-                for item in file_items
-                if isinstance(item, dict)
-            ]
             version_text = str(version)
+            all_have_digests = all(bool(item.get("digests")) for item in file_items if isinstance(item, dict))
+            any_has_sig = any(bool(item.get("has_sig")) for item in file_items if isinstance(item, dict))
+            all_yanked = all(bool(item.get("yanked")) for item in file_items if isinstance(item, dict))
             releases.append(
                 {
                     "version": version_text,
-                    "file_count": len(release_files),
-                    "files": release_files,
+                    "file_count": len(file_items),
                     "is_prerelease": _is_pypi_prerelease(version_text),
                     "looks_like_rc_nightly_snapshot_or_dev": _is_unapproved_label(version_text),
-                    "all_files_have_digests": all(item["has_digests"] for item in release_files)
-                    if release_files
-                    else False,
-                    "any_file_has_signature": any(item["has_signature"] for item in release_files),
-                    "all_files_yanked": all(item["yanked"] for item in release_files)
-                    if release_files
-                    else False,
+                    "all_files_have_digests": all_have_digests if file_items else False,
+                    "any_file_has_signature": any_has_sig,
+                    "all_files_yanked": all_yanked if file_items else False,
                 }
             )
+    del releases_payload
     return {
         "package": package,
         "location": f"https://pypi.org/project/{urllib.parse.quote(package)}/",
