@@ -118,19 +118,66 @@ class ReleaseParserTests(unittest.TestCase):
                 },
             },
         }
+        maven_artifacts = {
+            "response": {
+                "docs": [
+                    {
+                        "g": "org.apache.alpha",
+                        "a": "alpha-core",
+                        "latestVersion": "1.2.0-RC1",
+                        "versionCount": 2,
+                        "p": "jar",
+                        "timestamp": 1767225600000,
+                    }
+                ]
+            }
+        }
+        maven_versions = {
+            "response": {
+                "docs": [
+                    {"g": "org.apache.alpha", "a": "alpha-core", "v": "1.1.0", "timestamp": 1764547200000},
+                    {"g": "org.apache.alpha", "a": "alpha-core", "v": "1.2.0-RC1", "timestamp": 1767225600000},
+                ]
+            }
+        }
+        maven_pom = """\
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <description>Apache Alpha component</description>
+  <licenses>
+    <license><name>MIT</name></license>
+  </licenses>
+  <developers>
+    <developer><name>Alpha Team</name></developer>
+  </developers>
+</project>
+"""
         original = releases._read_url_json
-        releases._read_url_json = lambda url: responses[url]
+        original_text = releases._read_url_text
+
+        def fake_json(url: str) -> object:
+            if url.startswith("https://maven.test/search?"):
+                if "core=gav" in url:
+                    return maven_versions
+                return maven_artifacts
+            return responses[url]
+
+        releases._read_url_json = fake_json
+        releases._read_url_text = lambda url: maven_pom
         try:
             result = releases.platform_distribution_checks(
                 "alpha",
                 docker_images=["apache/alpha"],
                 pypi_packages=["apache-alpha"],
+                maven_group_ids=["org.apache.alpha"],
                 github_api_base="https://api.github.test/repos/apache",
                 docker_api_base="https://docker.test",
                 pypi_api_base="https://pypi.test",
+                maven_search_base="https://maven.test/search",
+                maven_repository_base="https://repo.maven.test/maven2",
             )
         finally:
             releases._read_url_json = original
+            releases._read_url_text = original_text
 
         self.assertEqual(result["guidelines"], releases.DISTRIBUTION_GUIDELINES_URL)
         self.assertTrue(result["github"]["available"])
@@ -142,6 +189,13 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertIn("project description", " ".join(result["hints"]["pypi"]))
         self.assertIn("ALv2 license", " ".join(result["hints"]["pypi"]))
         self.assertIn("latest version", " ".join(result["hints"]["pypi"]))
+        self.assertEqual(result["maven"][0]["group_id"], "org.apache.alpha")
+        self.assertEqual(result["maven"][0]["artifacts"][0]["artifact_id"], "alpha-core")
+        self.assertTrue(result["maven"][0]["artifacts"][0]["latest_version_looks_unapproved"])
+        self.assertFalse(result["maven"][0]["artifacts"][0]["latest_pom"]["license_is_alv2"])
+        self.assertIn("POM description", " ".join(result["hints"]["maven"]))
+        self.assertIn("ALv2 license", " ".join(result["hints"]["maven"]))
+        self.assertIn("source control", " ".join(result["hints"]["maven"]))
 
 
 if __name__ == "__main__":

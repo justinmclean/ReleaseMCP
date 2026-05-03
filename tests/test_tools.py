@@ -36,6 +36,10 @@ class ToolsTests(unittest.TestCase):
             tools.TOOLS["podling_releases"]["inputSchema"]["properties"]["pypi_packages"]["type"],
             "array",
         )
+        self.assertEqual(
+            tools.TOOLS["podling_releases"]["inputSchema"]["properties"]["maven_group_ids"]["type"],
+            "array",
+        )
 
 
 if __name__ == "__main__":

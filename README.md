@@ -8,7 +8,7 @@ It checks:
 - last release date and observed cadence
 - source artifacts, detached signatures, and checksum sidecars
 - Incubating naming and disclaimer hints
-- optional GitHub, Docker Hub, and PyPI distribution hints against the ASF Incubator distribution guide
+- optional GitHub, Docker Hub, PyPI, and Maven distribution hints against the ASF Incubator distribution guide
 
 ## Requirements
 
@@ -92,14 +92,14 @@ These examples show prompts an IPMC member or mentor could type into an MCP clie
 - "Show the source artifacts, signatures, and checksums for FooPodling."
 - "When was FooPodling's last Apache release, and what cadence does it appear to have?"
 - "Does FooPodling's release evidence show incubating naming and disclaimer hints?"
-- "Check FooPodling release evidence, including GitHub, Docker Hub, and PyPI distribution hints."
+- "Check FooPodling release evidence, including GitHub, Docker Hub, PyPI, and Maven distribution hints."
 
 ## Tools
 
 ### `podling_releases`
 
-Return release artifact, signature, checksum, cadence, Incubator naming evidence, and optional GitHub/Docker Hub/PyPI
-distribution evidence for one Apache Incubator podling.
+Return release artifact, signature, checksum, cadence, Incubator naming evidence, and optional
+GitHub/Docker Hub/PyPI/Maven distribution evidence for one Apache Incubator podling.
 
 The response also includes `source_statuses`, so callers can distinguish "no files found" from a source that could not
 be read.
@@ -110,12 +110,14 @@ Arguments:
 - `dist_base`: optional `dist.apache.org` base URL or local release directory
 - `archive_base`: optional `archive.apache.org` base URL or local archive directory
 - `max_depth`: optional traversal depth under the podling directory, either `0` or `1`; defaults to `1`
-- `include_platforms`: optional boolean; when true, fetches GitHub releases, Docker Hub metadata, and PyPI metadata
+- `include_platforms`: optional boolean; when true, fetches GitHub releases, Docker Hub metadata, PyPI metadata, and
+  Maven Central metadata
 - `github_project`: optional apache/<project> GitHub repository name; defaults to the podling slug
 - `docker_images`: optional Docker Hub image names in `namespace/repository` form; defaults to both ASF Incubator
   guideline patterns, `apache/<podling>` and `apache<podling>/<podling>`
 - `pypi_packages`: optional PyPI package names; defaults to the ASF Incubator guideline pattern, `apache-<podling>`
+- `maven_group_ids`: optional Maven groupIds; defaults to the ASF Incubator guideline pattern, `org.apache.<podling>`
 
 Platform checks cite the ASF Incubator distribution guide and keep observed facts separate from hints. Some guideline
-items still require human confirmation, such as whether Docker `latest` or PyPI's latest version points only to an
-IPMC-approved ASF release.
+items still require human confirmation, such as whether Docker `latest`, PyPI's latest version, or Maven artifacts point
+only to an IPMC-approved ASF release.

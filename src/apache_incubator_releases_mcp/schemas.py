@@ -30,6 +30,11 @@ PYPI_PACKAGES_PROPERTY = {
     "items": {"type": "string"},
     "description": "Optional PyPI package names; defaults to apache-<podling>",
 }
+MAVEN_GROUP_IDS_PROPERTY = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Optional Maven groupIds; defaults to org.apache.<podling>",
+}
 
 
 def input_schema(
@@ -73,4 +78,5 @@ def podling_release_properties() -> dict[str, Any]:
         "github_project": GITHUB_PROJECT_PROPERTY,
         "docker_images": DOCKER_IMAGES_PROPERTY,
         "pypi_packages": PYPI_PACKAGES_PROPERTY,
+        "maven_group_ids": MAVEN_GROUP_IDS_PROPERTY,
     }

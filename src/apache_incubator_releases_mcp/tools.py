@@ -79,6 +79,7 @@ def podling_releases(
     github_project: str | None = None,
     docker_images: list[str] | None = None,
     pypi_packages: list[str] | None = None,
+    maven_group_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return release evidence for one Apache Incubator podling."""
     return releases.release_overview(
@@ -90,6 +91,7 @@ def podling_releases(
         github_project=optional_string(github_project, "github_project"),
         docker_images=optional_string_list(docker_images, "docker_images"),
         pypi_packages=optional_string_list(pypi_packages, "pypi_packages"),
+        maven_group_ids=optional_string_list(maven_group_ids, "maven_group_ids"),
     )
 
 
@@ -97,7 +99,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     "podling_releases": schemas.tool_definition(
         description=(
             "Return release artifact, signature, checksum, cadence, Incubator naming evidence, "
-            "and optional GitHub/Docker Hub/PyPI distribution checks for one Apache "
+            "and optional GitHub/Docker Hub/PyPI/Maven distribution checks for one Apache "
             "Incubator podling."
         ),
         handler=podling_releases,

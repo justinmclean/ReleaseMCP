@@ -12,12 +12,17 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from xml.etree import ElementTree
 
 DEFAULT_DIST_BASE = "https://dist.apache.org/repos/dist/release/incubator"
 DEFAULT_ARCHIVE_BASE = "https://archive.apache.org/dist/incubator"
 DEFAULT_GITHUB_API_BASE = "https://api.github.com/repos/apache"
 DEFAULT_DOCKER_API_BASE = "https://hub.docker.com/v2/repositories"
 DEFAULT_PYPI_API_BASE = "https://pypi.org/pypi"
+DEFAULT_MAVEN_SEARCH_BASE = "https://search.maven.org/solrsearch/select"
+DEFAULT_MAVEN_REPOSITORY_BASE = "https://repo1.maven.org/maven2"
+MAVEN_ARTIFACT_LIMIT = 25
+MAVEN_VERSION_LIMIT = 20
 DISTRIBUTION_GUIDELINES_URL = "https://incubator.apache.org/guides/distribution.html"
 ARCHIVE_SUFFIXES = (
     ".tar.gz",
@@ -38,8 +43,15 @@ UNAPPROVED_TAG_RE = re.compile(
     re.I,
 )
 PYPI_PRERELEASE_RE = re.compile(r"(?:a|b|rc|dev)\d*$", re.I)
+MAVEN_UNAPPROVED_SUFFIX_RE = re.compile(
+    r"(?:^|[-.])(?:rc\d*|candidate|nightly|snapshot|dev|alpha|beta)(?:$|[-.])",
+    re.I,
+)
 INCUBATOR_DISCLAIMER_RE = re.compile(
-    r"\bincubat(?:ing|or)\b.*\bdisclaimer\b|\bdisclaimer\b.*\bincubat(?:ing|or)\b",
+    r"\bincubat(?:ing|or|ion)\b.*\bdisclaimer\b"
+    r"|\bdisclaimer\b.*\bincubat(?:ing|or|ion)\b"
+    r"|\bundergoing incubation\b.*\bApache Software Foundation\b"
+    r"|\bincubation is required\b.*\bnot yet been fully endorsed\b",
     re.I | re.S,
 )
 
@@ -667,24 +679,247 @@ def _docker_repository_facts(image: str, docker_api_base: str) -> dict[str, Any]
     }
 
 
+def _maven_search(query: str, maven_search_base: str, *, rows: int, core: str | None = None) -> Any:
+    params = {"q": query, "rows": str(rows), "wt": "json"}
+    if core:
+        params["core"] = core
+    return _read_url_json(f"{maven_search_base}?{urllib.parse.urlencode(params)}")
+
+
+def _maven_docs(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return []
+    docs = response.get("docs")
+    if not isinstance(docs, list):
+        return []
+    return [item for item in docs if isinstance(item, dict)]
+
+
+def _maven_pom_url(group_id: str, artifact_id: str, version: str, maven_repository_base: str) -> str:
+    group_path = "/".join(group_id.split("."))
+    filename = f"{artifact_id}-{version}.pom"
+    return f"{maven_repository_base.rstrip('/')}/{group_path}/{artifact_id}/{version}/{filename}"
+
+
+def _xml_text(element: ElementTree.Element, path: str) -> str | None:
+    found = element.find(path)
+    if found is None or found.text is None:
+        return None
+    text = found.text.strip()
+    return text or None
+
+
+def _maven_pom_facts(
+    url: str,
+    maven_repository_base: str,
+    seen: set[str] | None = None,
+) -> dict[str, Any]:
+    seen = seen or set()
+    if url in seen:
+        return {
+            "location": url,
+            "available": False,
+            "error": "Cyclic Maven parent POM reference",
+        }
+    seen.add(url)
+    try:
+        root = ElementTree.fromstring(_read_url_text(url))
+    except Exception as exc:
+        return {
+            "location": url,
+            "available": False,
+            "error": _url_error_message(exc),
+        }
+    namespace = ""
+    if root.tag.startswith("{"):
+        namespace = root.tag.split("}", 1)[0] + "}"
+    path = f".//{namespace}"
+    description = _xml_text(root, f"{path}description")
+    name = _xml_text(root, f"{path}name")
+    licenses = [
+        {
+            "name": _xml_text(license_item, f"{namespace}name"),
+            "url": _xml_text(license_item, f"{namespace}url"),
+        }
+        for license_item in root.findall(f"{path}license")
+    ]
+    developers = [
+        {
+            "name": _xml_text(developer, f"{namespace}name"),
+            "organization": _xml_text(developer, f"{namespace}organization"),
+        }
+        for developer in root.findall(f"{path}developer")
+    ]
+    scm = root.find(f"{path}scm")
+    scm_facts = None
+    if scm is not None:
+        scm_facts = {
+            "connection": _xml_text(scm, f"{namespace}connection"),
+            "developer_connection": _xml_text(scm, f"{namespace}developerConnection"),
+            "url": _xml_text(scm, f"{namespace}url"),
+        }
+    organization = root.find(f"{path}organization")
+    organization_facts = None
+    if organization is not None:
+        organization_facts = {
+            "name": _xml_text(organization, f"{namespace}name"),
+            "url": _xml_text(organization, f"{namespace}url"),
+        }
+    parent_facts = None
+    parent = root.find(f"{path}parent")
+    if parent is not None:
+        parent_group_id = _xml_text(parent, f"{namespace}groupId")
+        parent_artifact_id = _xml_text(parent, f"{namespace}artifactId")
+        parent_version = _xml_text(parent, f"{namespace}version")
+        if parent_group_id and parent_artifact_id and parent_version:
+            parent_url = _maven_pom_url(
+                parent_group_id,
+                parent_artifact_id,
+                parent_version,
+                maven_repository_base,
+            )
+            parent_facts = _maven_pom_facts(parent_url, maven_repository_base, seen)
+    license_values = [
+        value
+        for license_item in licenses
+        for value in (license_item["name"], license_item["url"])
+    ]
+    developer_values = [
+        value
+        for developer in developers
+        for value in (developer["name"], developer["organization"])
+    ]
+    organization_values = list(organization_facts.values()) if organization_facts else []
+    local_license_is_alv2 = any(_is_alv2_license(value) for value in license_values)
+    local_developer_mentions_apache = any(
+        "apache" in value.lower()
+        for value in developer_values + organization_values + [name]
+        if value
+    )
+    local_has_scm = bool(scm_facts and any(scm_facts.values()))
+    parent_available = bool(parent_facts and parent_facts["available"])
+    return {
+        "location": url,
+        "available": True,
+        "name": name,
+        "description_contains_incubator_disclaimer": _contains_incubator_disclaimer(description)
+        or bool(parent_available and parent_facts["description_contains_incubator_disclaimer"]),
+        "licenses": licenses,
+        "license_is_alv2": local_license_is_alv2
+        or bool(parent_available and parent_facts["license_is_alv2"]),
+        "developers": developers,
+        "organization": organization_facts,
+        "developer_mentions_apache": local_developer_mentions_apache
+        or bool(parent_available and parent_facts["developer_mentions_apache"]),
+        "scm": scm_facts,
+        "has_scm": local_has_scm or bool(parent_available and parent_facts["has_scm"]),
+        "parent": parent_facts,
+    }
+
+
+def _maven_artifact_versions(group_id: str, artifact_id: str, maven_search_base: str) -> list[dict[str, Any]]:
+    payload = _maven_search(
+        f'g:"{group_id}" AND a:"{artifact_id}"',
+        maven_search_base,
+        rows=MAVEN_VERSION_LIMIT,
+        core="gav",
+    )
+    versions = []
+    for item in _maven_docs(payload):
+        version = str(item.get("v") or item.get("latestVersion") or "")
+        if not version:
+            continue
+        versions.append(
+            {
+                "version": version,
+                "timestamp": item.get("timestamp"),
+                "looks_like_rc_nightly_snapshot_or_dev": _is_unapproved_label(version)
+                or bool(MAVEN_UNAPPROVED_SUFFIX_RE.search(version)),
+                "uses_clear_unapproved_suffix": bool(MAVEN_UNAPPROVED_SUFFIX_RE.search(version)),
+            }
+        )
+    return sorted(versions, key=lambda item: str(item["version"]), reverse=True)
+
+
+def _maven_group_facts(
+    group_id: str,
+    maven_search_base: str,
+    maven_repository_base: str,
+) -> dict[str, Any]:
+    location = f"https://central.sonatype.com/search?q={urllib.parse.quote(f'g:{group_id}')}"
+    try:
+        payload = _maven_search(f'g:"{group_id}"', maven_search_base, rows=MAVEN_ARTIFACT_LIMIT)
+    except Exception as exc:
+        return {
+            "group_id": group_id,
+            "location": location,
+            "available": False,
+            "error": _url_error_message(exc),
+            "artifacts": [],
+        }
+    docs = _maven_docs(payload)
+    artifacts = []
+    for item in docs:
+        artifact_id = str(item.get("a") or "")
+        latest_version = str(item.get("latestVersion") or "")
+        item_group_id = str(item.get("g") or group_id)
+        if not artifact_id or not latest_version:
+            continue
+        artifact = {
+            "group_id": item_group_id,
+            "artifact_id": artifact_id,
+            "latest_version": latest_version,
+            "version_count": item.get("versionCount"),
+            "packaging": item.get("p"),
+            "timestamp": item.get("timestamp"),
+            "under_expected_group_id": item_group_id == group_id,
+            "latest_version_looks_unapproved": _is_unapproved_label(latest_version)
+            or bool(MAVEN_UNAPPROVED_SUFFIX_RE.search(latest_version)),
+            "versions": _maven_artifact_versions(item_group_id, artifact_id, maven_search_base),
+            "latest_pom": _maven_pom_facts(
+                _maven_pom_url(item_group_id, artifact_id, latest_version, maven_repository_base),
+                maven_repository_base,
+            ),
+        }
+        artifacts.append(artifact)
+    return {
+        "group_id": group_id,
+        "location": location,
+        "available": True,
+        "artifact_count": len(artifacts),
+        "artifacts": sorted(artifacts, key=lambda item: item["artifact_id"]),
+    }
+
+
 def platform_distribution_checks(
     podling: str,
     *,
     github_project: str | None = None,
     docker_images: list[str] | None = None,
     pypi_packages: list[str] | None = None,
+    maven_group_ids: list[str] | None = None,
     github_api_base: str = DEFAULT_GITHUB_API_BASE,
     docker_api_base: str = DEFAULT_DOCKER_API_BASE,
     pypi_api_base: str = DEFAULT_PYPI_API_BASE,
+    maven_search_base: str = DEFAULT_MAVEN_SEARCH_BASE,
+    maven_repository_base: str = DEFAULT_MAVEN_REPOSITORY_BASE,
 ) -> dict[str, Any]:
     slug = podling_slug(podling)
     github_project = github_project or slug
     docker_images = docker_images or [f"apache/{slug}", f"apache{slug}/{slug}"]
     pypi_packages = pypi_packages or [f"apache-{slug}"]
+    maven_group_ids = maven_group_ids or [f"org.apache.{slug}"]
 
     github = _github_release_facts(github_project, github_api_base)
     docker = [_docker_repository_facts(image, docker_api_base) for image in docker_images]
     pypi = [_pypi_project_facts(package, pypi_api_base) for package in pypi_packages]
+    maven = [
+        _maven_group_facts(group_id, maven_search_base, maven_repository_base)
+        for group_id in maven_group_ids
+    ]
 
     github_hints: list[str] = []
     if not github["available"]:
@@ -791,15 +1026,73 @@ def platform_distribution_checks(
             "IPMC-approved ASF releases."
         )
 
+    maven_hints: list[str] = []
+    available_maven = [item for item in maven if item["available"]]
+    if not available_maven:
+        maven_hints.append(
+            "Maven Central artifacts could not be inspected; verify org.apache.<project> manually."
+        )
+    for group in available_maven:
+        group_id = group["group_id"]
+        if not group["artifact_count"]:
+            maven_hints.append(f"No Maven Central artifacts were found for groupId {group_id}.")
+            continue
+        if not group_id.startswith("org.apache."):
+            maven_hints.append(
+                f"Maven groupId {group_id} is not under the expected org.apache.<project> namespace."
+            )
+        for artifact in group["artifacts"]:
+            coordinate = f"{artifact['group_id']}:{artifact['artifact_id']}"
+            pom = artifact["latest_pom"]
+            if artifact["latest_version_looks_unapproved"]:
+                maven_hints.append(
+                    f"Verify Maven latest version for {coordinate} does not point to a release "
+                    "candidate, nightly, snapshot, or dev build."
+                )
+            if any(
+                item["looks_like_rc_nightly_snapshot_or_dev"]
+                and not item["uses_clear_unapproved_suffix"]
+                for item in artifact["versions"]
+            ):
+                maven_hints.append(
+                    f"Some Maven RC, nightly, snapshot, or dev versions for {coordinate} "
+                    "are not clearly marked with a version suffix."
+                )
+            if not pom["available"]:
+                maven_hints.append(f"Latest Maven POM for {coordinate} could not be inspected.")
+                continue
+            if not pom["description_contains_incubator_disclaimer"]:
+                maven_hints.append(
+                    f"Maven POM description for {coordinate} does not include visible "
+                    "incubation disclaimer text."
+                )
+            if not pom["license_is_alv2"]:
+                maven_hints.append(
+                    f"Maven POM for {coordinate} does not clearly set the ALv2 license."
+                )
+            if not pom["developer_mentions_apache"]:
+                maven_hints.append(
+                    f"Maven POM for {coordinate} does not clearly name Apache as developer or organization."
+                )
+            if not pom["has_scm"]:
+                maven_hints.append(
+                    f"Maven POM for {coordinate} does not include visible source control information."
+                )
+            maven_hints.append(
+                f"Verify Maven artifacts for {coordinate} are made from IPMC-approved ASF releases."
+            )
+
     return {
         "guidelines": DISTRIBUTION_GUIDELINES_URL,
         "github": github,
         "docker_hub": docker,
         "pypi": pypi,
+        "maven": maven,
         "hints": {
             "github": github_hints,
             "docker_hub": docker_hints,
             "pypi": pypi_hints,
+            "maven": maven_hints,
         },
     }
 
@@ -814,9 +1107,12 @@ def release_overview(
     github_project: str | None = None,
     docker_images: list[str] | None = None,
     pypi_packages: list[str] | None = None,
+    maven_group_ids: list[str] | None = None,
     github_api_base: str = DEFAULT_GITHUB_API_BASE,
     docker_api_base: str = DEFAULT_DOCKER_API_BASE,
     pypi_api_base: str = DEFAULT_PYPI_API_BASE,
+    maven_search_base: str = DEFAULT_MAVEN_SEARCH_BASE,
+    maven_repository_base: str = DEFAULT_MAVEN_REPOSITORY_BASE,
 ) -> dict[str, Any]:
     collected = collect_files(
         podling,
@@ -842,8 +1138,11 @@ def release_overview(
             github_project=github_project,
             docker_images=docker_images,
             pypi_packages=pypi_packages,
+            maven_group_ids=maven_group_ids,
             github_api_base=github_api_base,
             docker_api_base=docker_api_base,
             pypi_api_base=pypi_api_base,
+            maven_search_base=maven_search_base,
+            maven_repository_base=maven_repository_base,
         )
     return result
