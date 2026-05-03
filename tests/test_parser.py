@@ -102,23 +102,28 @@ class ReleaseParserTests(unittest.TestCase):
             collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
             files = [releases.ReleaseFile(**item) for item in collected["files"]]
         source = "apache-alpha-1.1.0-incubating-source-release.zip"
-        original = releases._read_url_text
+        original = releases._scan_url_page
 
-        def fake_read_url_text(url: str) -> str:
+        def fake_scan_url_page(url: str) -> tuple[list, str]:
             if url == "https://alpha.apache.org/downloads.html":
-                return f"""\
-<html><body>
-  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
-  <a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>
-</body></html>
-"""
-            raise OSError("not found")
+                html_text = (
+                    f"<html><body>"
+                    f'<a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>'
+                    f'<a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>'
+                    f"</body></html>"
+                )
+            else:
+                raise OSError("not found")
+            s = releases._HtmlLinkScanner()
+            s.feed(html_text)
+            s.close()
+            return s.links, s.visible_text
 
-        releases._read_url_text = fake_read_url_text
+        releases._scan_url_page = fake_scan_url_page
         try:
             discovery = releases.discover_release_page_url("alpha", files)
         finally:
-            releases._read_url_text = original
+            releases._scan_url_page = original
 
         self.assertTrue(discovery["found"])
         self.assertEqual(discovery["location"], "https://alpha.apache.org/downloads.html")
@@ -128,25 +133,30 @@ class ReleaseParserTests(unittest.TestCase):
             collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
             files = [releases.ReleaseFile(**item) for item in collected["files"]]
         source = "apache-alpha-1.1.0-incubating-source-release.zip"
-        original = releases._read_url_text
+        original = releases._scan_url_page
 
-        def fake_read_url_text(url: str) -> str:
+        def fake_scan_url_page(url: str) -> tuple[list, str]:
             if url == "https://alpha.apache.org/":
-                return '<html><body><a href="/get-alpha.html">Downloads</a></body></html>'
-            if url == "https://alpha.apache.org/get-alpha.html":
-                return f"""\
-<html><body>
-  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
-  <a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>
-</body></html>
-"""
-            raise OSError("not found")
+                html_text = '<html><body><a href="/get-alpha.html">Downloads</a></body></html>'
+            elif url == "https://alpha.apache.org/get-alpha.html":
+                html_text = (
+                    f"<html><body>"
+                    f'<a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>'
+                    f'<a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>'
+                    f"</body></html>"
+                )
+            else:
+                raise OSError("not found")
+            s = releases._HtmlLinkScanner()
+            s.feed(html_text)
+            s.close()
+            return s.links, s.visible_text
 
-        releases._read_url_text = fake_read_url_text
+        releases._scan_url_page = fake_scan_url_page
         try:
             discovery = releases.discover_release_page_url("alpha", files)
         finally:
-            releases._read_url_text = original
+            releases._scan_url_page = original
 
         self.assertTrue(discovery["found"])
         self.assertEqual(discovery["location"], "https://alpha.apache.org/get-alpha.html")
@@ -157,28 +167,33 @@ class ReleaseParserTests(unittest.TestCase):
             collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
         source = "apache-alpha-1.1.0-incubating-source-release.zip"
         original_collect_files = releases.collect_files
-        original_read_url_text = releases._read_url_text
+        original_scan_url_page = releases._scan_url_page
 
-        def fake_read_url_text(url: str) -> str:
+        def fake_scan_url_page(url: str) -> tuple[list, str]:
             if url == "https://alpha.apache.org/downloads.html":
-                return f"""\
-<html><body>
-  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
-  <a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>
-  <a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>
-  <a href="https://downloads.apache.org/incubator/alpha/KEYS">KEYS</a>
-  Please verify downloads with checksums and OpenPGP signatures.
-</body></html>
-"""
-            raise OSError("not found")
+                html_text = (
+                    f"<html><body>"
+                    f'<a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>'
+                    f'<a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>'
+                    f'<a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>'
+                    f'<a href="https://downloads.apache.org/incubator/alpha/KEYS">KEYS</a>'
+                    f" Please verify downloads with checksums and OpenPGP signatures."
+                    f"</body></html>"
+                )
+            else:
+                raise OSError("not found")
+            s = releases._HtmlLinkScanner()
+            s.feed(html_text)
+            s.close()
+            return s.links, s.visible_text
 
         releases.collect_files = lambda *args, **kwargs: collected
-        releases._read_url_text = fake_read_url_text
+        releases._scan_url_page = fake_scan_url_page
         try:
             result = releases.release_overview("alpha")
         finally:
             releases.collect_files = original_collect_files
-            releases._read_url_text = original_read_url_text
+            releases._scan_url_page = original_scan_url_page
 
         self.assertTrue(result["release_page_discovery"]["found"])
         self.assertEqual(
@@ -190,26 +205,31 @@ class ReleaseParserTests(unittest.TestCase):
     def test_release_overview_uses_discovered_incubator_download_page_as_dist_source(self) -> None:
         with release_dirs() as (_dist, archive):
             source = "apache-resilientdb-1.0.0-incubating-source-release.zip"
-            original_read_url_text = releases._read_url_text
+            original_scan_url_page = releases._scan_url_page
 
-            def fake_read_url_text(url: str) -> str:
+            def fake_scan_url_page(url: str) -> tuple[list, str]:
                 if url == "https://resilientdb.incubator.apache.org/download.html":
-                    return f"""\
-<html><body>
-  <a href="https://www.apache.org/dyn/closer.lua/incubator/resilientdb/{source}">Source</a>
-  <a href="https://downloads.apache.org/incubator/resilientdb/{source}.asc">PGP</a>
-  <a href="https://downloads.apache.org/incubator/resilientdb/{source}.sha512">SHA512</a>
-  <a href="https://downloads.apache.org/incubator/resilientdb/KEYS">KEYS</a>
-  Please verify downloads with checksums and OpenPGP signatures.
-</body></html>
-"""
-                raise OSError("not found")
+                    html_text = (
+                        f"<html><body>"
+                        f'<a href="https://www.apache.org/dyn/closer.lua/incubator/resilientdb/{source}">Source</a>'
+                        f'<a href="https://downloads.apache.org/incubator/resilientdb/{source}.asc">PGP</a>'
+                        f'<a href="https://downloads.apache.org/incubator/resilientdb/{source}.sha512">SHA512</a>'
+                        f'<a href="https://downloads.apache.org/incubator/resilientdb/KEYS">KEYS</a>'
+                        f" Please verify downloads with checksums and OpenPGP signatures."
+                        f"</body></html>"
+                    )
+                else:
+                    raise OSError("not found")
+                s = releases._HtmlLinkScanner()
+                s.feed(html_text)
+                s.close()
+                return s.links, s.visible_text
 
-            releases._read_url_text = fake_read_url_text
+            releases._scan_url_page = fake_scan_url_page
             try:
                 result = releases.release_overview("resilientdb", archive_base=str(archive))
             finally:
-                releases._read_url_text = original_read_url_text
+                releases._scan_url_page = original_scan_url_page
 
         self.assertEqual(
             result["sources"]["dist"],

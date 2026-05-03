@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import contextvars
 import html
+import http.client
 import json
 import re
+import ssl
 import tarfile
 import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -44,9 +48,7 @@ CHECKSUM_SUFFIXES = (".sha512", ".sha256", ".sha1", ".md5")
 SIGNATURE_SUFFIXES = (".asc", ".sig")
 SIDE_SUFFIXES = SIGNATURE_SUFFIXES + CHECKSUM_SUFFIXES
 VERSION_RE = re.compile(r"(?<!\d)v?(\d+(?:[._-]\d+)+(?:[-._][A-Za-z0-9]+)*)")
-HTML_HREF_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>(.*)', re.I)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
-HTML_ANCHOR_RE = re.compile(r"<a\s+[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
 DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}))?\b")
 UNAPPROVED_TAG_RE = re.compile(
     r"(?:^|[-._\s])(?:rc\d*|candidate|nightly|snapshot|dev|master|main)(?:$|[-._\s])",
@@ -63,6 +65,176 @@ INCUBATOR_DISCLAIMER_RE = re.compile(
     r"|\bundergoing incubation\b.*\bApache Software Foundation\b"
     r"|\bincubation is required\b.*\bnot yet been fully endorsed\b",
     re.I | re.S,
+)
+
+
+class _HtmlLinkScanner(HTMLParser):
+    """Streaming HTML parser: accumulates (href, anchor_text, tail_text) tuples and visible text."""
+
+    convert_charrefs = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str, str]] = []
+        self._visible: list[str] = []
+        self._href: str | None = None
+        self._text: list[str] = []
+        self._pending_href: str | None = None
+        self._pending_text: str | None = None
+        self._tail: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._flush_pending()
+        if tag.lower() == "a":
+            self._href = dict(attrs).get("href") or ""
+            self._text = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._href is not None:
+            self._pending_href = self._href
+            self._pending_text = "".join(self._text)
+            self._tail = []
+            self._href = None
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._text.append(data)
+        elif self._pending_href is not None:
+            self._tail.append(data)
+        self._visible.append(data)
+
+    def _flush_pending(self) -> None:
+        if self._pending_href is not None:
+            self.links.append((self._pending_href, self._pending_text or "", "".join(self._tail)))
+            self._pending_href = None
+            self._pending_text = None
+            self._tail = []
+
+    def close(self) -> None:
+        self._flush_pending()
+        super().close()
+
+    @property
+    def visible_text(self) -> str:
+        return "".join(self._visible)
+
+
+class _HttpSession:
+    """Per-operation HTTP connection pool with streaming HTML support.
+
+    Maintains one persistent connection per (scheme, host, port) tuple so that
+    the dist, archive, and project-website fetches that happen during a single
+    podling check share connections instead of opening separate TCP handshakes.
+    """
+
+    _UA = "apache-incubator-releases-mcp/0.1.0"
+    _CHUNK = 65536  # 64 KB read chunks for streaming
+
+    def __init__(self) -> None:
+        self._conns: dict[tuple[str, str, int], http.client.HTTPConnection] = {}
+
+    def _open(self, scheme: str, host: str, port: int) -> http.client.HTTPConnection:
+        key = (scheme, host, port)
+        conn = self._conns.get(key)
+        if conn is None:
+            if scheme == "https":
+                ctx = ssl.create_default_context()
+                conn = http.client.HTTPSConnection(host, port, timeout=30, context=ctx)
+            else:
+                conn = http.client.HTTPConnection(host, port, timeout=30)
+            self._conns[key] = conn
+        return conn
+
+    def _request(self, url: str, depth: int = 0) -> http.client.HTTPResponse:
+        if depth > 5:
+            raise URLError("too many redirects")
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if scheme == "https" else 80)
+        path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+        conn = self._open(scheme, host, port)
+        for attempt in range(2):
+            try:
+                conn.request("GET", path, headers={"User-Agent": self._UA, "Accept-Encoding": "identity"})
+                resp = conn.getresponse()
+                break
+            except (http.client.HTTPException, OSError):
+                if attempt:
+                    raise
+                conn.close()
+                key = (scheme, host, port)
+                if scheme == "https":
+                    ctx = ssl.create_default_context()
+                    conn = http.client.HTTPSConnection(host, port, timeout=30, context=ctx)
+                else:
+                    conn = http.client.HTTPConnection(host, port, timeout=30)
+                self._conns[key] = conn
+        if resp.status in (301, 302, 303, 307, 308):
+            location = resp.getheader("Location") or ""
+            resp.read()
+            if location:
+                return self._request(urllib.parse.urljoin(url, location), depth + 1)
+        if resp.status >= 400:
+            resp.read()
+            raise HTTPError(url, resp.status, resp.reason, {}, None)
+        return resp
+
+    def get_text(self, url: str) -> str:
+        return self._request(url).read().decode("utf-8", errors="replace")
+
+    def scan_page(self, url: str) -> tuple[list[tuple[str, str, str]], str]:
+        """Stream-parse an HTML page.
+
+        Returns ``(links, visible_text)`` where ``links`` is a list of
+        ``(href, anchor_text, tail_text)`` tuples and ``visible_text`` is the
+        concatenated text content.  The response body is processed in
+        ``_CHUNK``-byte increments and discarded immediately, so peak memory is
+        proportional to the number of anchor tags and visible text — not the
+        full HTML size.
+        """
+        resp = self._request(url)
+        scanner = _HtmlLinkScanner()
+        try:
+            while True:
+                chunk = resp.read(self._CHUNK)
+                if not chunk:
+                    break
+                scanner.feed(chunk.decode("utf-8", errors="replace"))
+        finally:
+            scanner.close()
+            resp.read()  # drain so the connection can be reused
+        return scanner.links, scanner.visible_text
+
+    def close(self) -> None:
+        for conn in self._conns.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._conns.clear()
+
+    def __enter__(self) -> "_HttpSession":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class _NullContext:
+    """No-op context manager used when a session is already active."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+
+# Active session for the current logical operation.  Set by collect_files /
+# release_overview so that all internal HTTP calls share connections.
+_session_var: contextvars.ContextVar[_HttpSession | None] = contextvars.ContextVar(
+    "_session_var", default=None
 )
 
 
@@ -119,55 +291,71 @@ def _join_source(base: str, podling: str) -> str:
 
 
 def _read_url_text(url: str) -> str:
+    session = _session_var.get()
+    if session is not None:
+        return session.get_text(url)
     request = urllib.request.Request(url, headers={"User-Agent": "apache-incubator-releases-mcp/0.1.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
-def _read_text_source(location: str) -> str:
+def _scan_url_page(url: str) -> tuple[list[tuple[str, str, str]], str]:
+    """Stream-parse an HTML page at *url*, returning (links, visible_text).
+
+    This is a module-level function so tests can monkey-patch it to inject
+    canned HTML without making real HTTP requests.
+    """
+    session = _session_var.get()
+    if session is not None:
+        return session.scan_page(url)
+    with _HttpSession() as tmp:
+        return tmp.scan_page(url)
+
+
+def _scan_local_page(path: Path) -> tuple[list[tuple[str, str, str]], str]:
+    text = path.expanduser().read_text(encoding="utf-8", errors="replace")
+    scanner = _HtmlLinkScanner()
+    scanner.feed(text)
+    scanner.close()
+    return scanner.links, scanner.visible_text
+
+
+def _fetch_and_scan_page(location: str) -> tuple[list[tuple[str, str, str]], str]:
+    """Scan an HTML page from a URL (streaming) or a local path (full read)."""
     if _is_url(location):
-        return _read_url_text(location)
-    return Path(location).expanduser().read_text(encoding="utf-8", errors="replace")
+        return _scan_url_page(location)
+    return _scan_local_page(Path(location))
+
 
 
 def _read_url_json(url: str) -> Any:
     return json.loads(_read_url_text(url))
 
 
-def _parse_listing_entries(text: str) -> list[dict[str, str | None]]:
-    entries: list[dict[str, str | None]] = []
-    for line in text.splitlines():
-        match = HTML_HREF_RE.search(line)
-        if not match:
-            continue
-        href = html.unescape(match.group(1))
-        label = html.unescape(HTML_TAG_RE.sub("", match.group(2))).strip()
-        if href.startswith("?") or href.startswith("#") or href in {"../", "/"}:
-            continue
-        tail = html.unescape(HTML_TAG_RE.sub(" ", match.group(3)))
-        date_match = DATE_RE.search(tail)
-        last_modified = None
-        if date_match:
-            hour = int(date_match.group(4) or 0)
-            minute = int(date_match.group(5) or 0)
-            last_modified = (
-                datetime(
-                    int(date_match.group(1)),
-                    int(date_match.group(2)),
-                    int(date_match.group(3)),
-                    hour,
-                    minute,
-                    tzinfo=UTC,
-                )
-                .isoformat()
-                .replace("+00:00", "Z")
+def _parse_listing_tail(tail: str) -> tuple[str | None, str | None]:
+    """Extract (last_modified ISO string, size string) from a directory-listing tail."""
+    date_match = DATE_RE.search(tail)
+    last_modified = None
+    if date_match:
+        hour = int(date_match.group(4) or 0)
+        minute = int(date_match.group(5) or 0)
+        last_modified = (
+            datetime(
+                int(date_match.group(1)),
+                int(date_match.group(2)),
+                int(date_match.group(3)),
+                hour,
+                minute,
+                tzinfo=UTC,
             )
-        size = None
-        size_match = re.search(r"\s(\d+(?:\.\d+)?[KMGTP]?|-)\s*$", tail.strip())
-        if size_match:
-            size = None if size_match.group(1) == "-" else size_match.group(1)
-        entries.append({"href": href, "label": label or href, "last_modified": last_modified, "size": size})
-    return entries
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    size = None
+    size_match = re.search(r"\s(\d+(?:\.\d+)?[KMGTP]?|-)\s*$", tail.strip())
+    if size_match:
+        size = None if size_match.group(1) == "-" else size_match.group(1)
+    return last_modified, size
 
 
 def _artifact_name(name: str) -> str:
@@ -264,7 +452,7 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
         )
     seen.add(url)
     try:
-        entries = _parse_listing_entries(_read_url_text(url))
+        raw_links, _ = _scan_url_page(url)
     except Exception as exc:
         return [], SourceStatus(
             source=source,
@@ -275,8 +463,9 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
             error=_url_error_message(exc),
         )
     files: list[ReleaseFile] = []
-    for entry in entries:
-        href = str(entry["href"])
+    for href, label, tail in raw_links:
+        if href.startswith("?") or href.startswith("#") or href in {"../", "/"}:
+            continue
         full = urllib.parse.urljoin(url, href)
         if href.endswith("/"):
             if max_depth > 0:
@@ -284,6 +473,7 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
                 files.extend(child_files)
             continue
         name = urllib.parse.unquote(Path(urllib.parse.urlparse(full).path).name)
+        last_modified, size = _parse_listing_tail(tail)
         files.append(
             ReleaseFile(
                 name=name,
@@ -293,8 +483,8 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
                 kind=_kind(name),
                 artifact_name=_artifact_name(name),
                 version=_version(name),
-                last_modified=entry["last_modified"],
-                size=entry["size"],
+                last_modified=last_modified,
+                size=size,
             )
         )
     return files, SourceStatus(
@@ -317,15 +507,23 @@ def collect_files(
     sources = {"archive": _join_source(archive_base, slug)}
     if dist_base is not None:
         sources = {"dist": _join_source(dist_base, slug), **sources}
-    files: list[ReleaseFile] = []
-    source_statuses: list[SourceStatus] = []
-    for source, location in sources.items():
-        if _is_url(location):
-            source_files, status = _collect_url(location, source, max_depth)
-        else:
-            source_files, status = _collect_local(Path(location), source, max_depth)
-        files.extend(source_files)
-        source_statuses.append(status)
+    # Create a session if one isn't already active so dist + archive share connections.
+    ctx: _HttpSession | _NullContext = _NullContext() if _session_var.get() else _HttpSession()
+    with ctx as new_session:
+        token = _session_var.set(new_session) if new_session is not None else None
+        try:
+            files: list[ReleaseFile] = []
+            source_statuses: list[SourceStatus] = []
+            for source, location in sources.items():
+                if _is_url(location):
+                    source_files, status = _collect_url(location, source, max_depth)
+                else:
+                    source_files, status = _collect_local(Path(location), source, max_depth)
+                files.extend(source_files)
+                source_statuses.append(status)
+        finally:
+            if token is not None:
+                _session_var.reset(token)
     unique = {(item.source, item.location): item for item in files}
     return {
         "podling": podling,
@@ -480,14 +678,11 @@ def incubating_hints(files: list[ReleaseFile]) -> dict[str, Any]:
     }
 
 
-def _plain_text_from_html(value: str) -> str:
-    return html.unescape(HTML_TAG_RE.sub(" ", value)).strip()
-
-
-def _release_page_links(page_text: str, page_url: str) -> list[dict[str, Any]]:
+def _build_page_links(raw_links: list[tuple[str, str, str]], page_url: str) -> list[dict[str, Any]]:
+    """Convert raw scanner tuples into the structured link dicts used by release-page checks."""
     links = []
-    for match in HTML_ANCHOR_RE.finditer(page_text):
-        href = html.unescape(match.group(1)).strip()
+    for href, text, _tail in raw_links:
+        href = href.strip()
         if not href or href.startswith("#"):
             continue
         resolved = href if href.startswith("[preferred]") else urllib.parse.urljoin(page_url, href)
@@ -496,7 +691,7 @@ def _release_page_links(page_text: str, page_url: str) -> list[dict[str, Any]]:
             {
                 "href": href,
                 "resolved": resolved,
-                "text": _plain_text_from_html(match.group(2)),
+                "text": text,
                 "scheme": parsed.scheme or None,
                 "host": parsed.netloc or None,
                 "path": urllib.parse.unquote(parsed.path),
@@ -528,7 +723,7 @@ def _release_file_from_link(link: dict[str, Any], source: str) -> ReleaseFile | 
 
 def _release_page_files(podling: str, release_page_url: str) -> tuple[list[ReleaseFile], SourceStatus]:
     try:
-        page_text = _read_text_source(release_page_url)
+        raw_links, _ = _fetch_and_scan_page(release_page_url)
     except Exception as exc:
         return [], SourceStatus(
             source="dist",
@@ -540,9 +735,10 @@ def _release_page_files(podling: str, release_page_url: str) -> tuple[list[Relea
         )
 
     slug = podling_slug(podling)
+    links = _build_page_links(raw_links, release_page_url)
     files: list[ReleaseFile] = []
     seen: set[str] = set()
-    for link in _release_page_links(page_text, release_page_url):
+    for link in links:
         if not (
             link["uses_closer_lua"]
             or link["uses_preferred_variable"]
@@ -568,9 +764,10 @@ def _release_page_files(podling: str, release_page_url: str) -> tuple[list[Relea
     )
 
 
-def _is_release_page_candidate(page_text: str, page_url: str, files: list[ReleaseFile]) -> bool:
-    links = _release_page_links(page_text, page_url)
-    text = _plain_text_from_html(page_text).lower()
+def _is_release_page_candidate(
+    links: list[dict[str, Any]], visible_text: str, files: list[ReleaseFile]
+) -> bool:
+    text = visible_text.lower()
     current_artifact_names = {item.name for item in _source_artifacts(files) if item.source == "dist"}
     linked_names = {_link_basename(link) for link in links}
     has_known_artifact = bool(current_artifact_names & linked_names)
@@ -583,10 +780,10 @@ def _is_release_page_candidate(page_text: str, page_url: str, files: list[Releas
     return has_known_artifact or (has_release_link and (has_download_text or has_verification_hint))
 
 
-def _homepage_release_links(homepage_text: str, homepage_url: str) -> list[str]:
+def _homepage_release_links(links: list[dict[str, Any]]) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
-    for link in _release_page_links(homepage_text, homepage_url):
+    for link in links:
         haystack = f"{link['href']} {link['text']}".lower()
         if "download" not in haystack and "release" not in haystack:
             continue
@@ -615,11 +812,12 @@ def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[st
             return None
         attempted.append(url)
         try:
-            page_text = _read_url_text(url)
+            raw_links, visible_text = _scan_url_page(url)
         except Exception as exc:
             errors[url] = _url_error_message(exc)
             return None
-        if _is_release_page_candidate(page_text, url, files):
+        page_links = _build_page_links(raw_links, url)
+        if _is_release_page_candidate(page_links, visible_text, files):
             return url
         return None
 
@@ -629,12 +827,13 @@ def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[st
 
     for base_url in base_urls:
         try:
-            homepage_text = _read_url_text(base_url)
+            raw_links, _ = _scan_url_page(base_url)
         except Exception as exc:
             errors[base_url] = _url_error_message(exc)
         else:
             attempted.append(base_url)
-            for candidate in _homepage_release_links(homepage_text, base_url):
+            page_links = _build_page_links(raw_links, base_url)
+            for candidate in _homepage_release_links(page_links):
                 if found := inspect(candidate):
                     return {"found": True, "location": found, "attempted": attempted, "errors": errors}
 
@@ -657,8 +856,8 @@ def _is_top_level_closer_link(link: dict[str, Any], podling: str) -> bool:
     return len(parts) <= 1 or (len(parts) == 2 and parts[0] == "incubator" and parts[1] == podling)
 
 
-def _has_verification_instructions(page_text: str, links: list[dict[str, Any]]) -> bool:
-    text = _plain_text_from_html(page_text).lower()
+def _has_verification_instructions(visible_text: str, links: list[dict[str, Any]]) -> bool:
+    text = visible_text.lower()
     link_targets = " ".join(str(link["resolved"]).lower() for link in links)
     verification_words = ("checksum", "sha", "signature", "pgp", "openpgp")
     return (
@@ -674,7 +873,7 @@ def release_page_checks(
 ) -> dict[str, Any]:
     slug = podling_slug(podling)
     try:
-        page_text = _read_text_source(release_page_url)
+        raw_links, visible_text = _fetch_and_scan_page(release_page_url)
     except Exception as exc:
         return {
             "guidelines": RELEASE_DOWNLOAD_PAGES_URL,
@@ -686,7 +885,7 @@ def release_page_checks(
             "hints": ["Release download page could not be inspected."],
         }
 
-    links = _release_page_links(page_text, release_page_url)
+    links = _build_page_links(raw_links, release_page_url)
     current_sources = [item for item in _source_artifacts(files) if item.source == "dist"]
     current_artifact_names = {item.name for item in current_sources}
     current_signature_names = {
@@ -723,7 +922,7 @@ def release_page_checks(
     keys_links = [link for link in links if _link_basename(link).lower() in {"keys", "keys.txt"}]
     bad_dist_links = [link for link in links if link["is_direct_dist_apache"]]
     top_level_closer_links = [link for link in links if _is_top_level_closer_link(link, slug)]
-    verification_instructions = _has_verification_instructions(page_text, links)
+    verification_instructions = _has_verification_instructions(visible_text, links)
 
     facts = {
         "link_count": len(links),
@@ -1430,6 +1629,51 @@ def platform_distribution_checks(
 
 
 def release_overview(
+    podling: str,
+    *,
+    dist_base: str | None = None,
+    archive_base: str = DEFAULT_ARCHIVE_BASE,
+    max_depth: int = 1,
+    release_page_url: str | None = None,
+    include_platforms: bool = False,
+    github_project: str | None = None,
+    docker_images: list[str] | None = None,
+    pypi_packages: list[str] | None = None,
+    maven_group_ids: list[str] | None = None,
+    github_api_base: str = DEFAULT_GITHUB_API_BASE,
+    docker_api_base: str = DEFAULT_DOCKER_API_BASE,
+    pypi_api_base: str = DEFAULT_PYPI_API_BASE,
+    maven_search_base: str = DEFAULT_MAVEN_SEARCH_BASE,
+    maven_repository_base: str = DEFAULT_MAVEN_REPOSITORY_BASE,
+) -> dict[str, Any]:
+    # One session covers dist, archive, project-website, and release-page fetches.
+    ctx: _HttpSession | _NullContext = _NullContext() if _session_var.get() else _HttpSession()
+    with ctx as new_session:
+        token = _session_var.set(new_session) if new_session is not None else None
+        try:
+            return _release_overview_impl(
+                podling,
+                dist_base=dist_base,
+                archive_base=archive_base,
+                max_depth=max_depth,
+                release_page_url=release_page_url,
+                include_platforms=include_platforms,
+                github_project=github_project,
+                docker_images=docker_images,
+                pypi_packages=pypi_packages,
+                maven_group_ids=maven_group_ids,
+                github_api_base=github_api_base,
+                docker_api_base=docker_api_base,
+                pypi_api_base=pypi_api_base,
+                maven_search_base=maven_search_base,
+                maven_repository_base=maven_repository_base,
+            )
+        finally:
+            if token is not None:
+                _session_var.reset(token)
+
+
+def _release_overview_impl(
     podling: str,
     *,
     dist_base: str | None = None,
