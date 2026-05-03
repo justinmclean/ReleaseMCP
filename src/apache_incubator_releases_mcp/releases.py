@@ -24,6 +24,7 @@ DEFAULT_MAVEN_REPOSITORY_BASE = "https://repo1.maven.org/maven2"
 MAVEN_ARTIFACT_LIMIT = 25
 MAVEN_VERSION_LIMIT = 20
 DISTRIBUTION_GUIDELINES_URL = "https://incubator.apache.org/guides/distribution.html"
+RELEASE_DOWNLOAD_PAGES_URL = "https://infra.apache.org/release-download-pages.html"
 ARCHIVE_SUFFIXES = (
     ".tar.gz",
     ".tar.bz2",
@@ -37,6 +38,7 @@ SIDE_SUFFIXES = SIGNATURE_SUFFIXES + CHECKSUM_SUFFIXES
 VERSION_RE = re.compile(r"(?<!\d)v?(\d+(?:[._-]\d+)+(?:[-._][A-Za-z0-9]+)*)")
 HTML_HREF_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>(.*)', re.I)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
+HTML_ANCHOR_RE = re.compile(r"<a\s+[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
 DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}))?\b")
 UNAPPROVED_TAG_RE = re.compile(
     r"(?:^|[-._\s])(?:rc\d*|candidate|nightly|snapshot|dev|master|main)(?:$|[-._\s])",
@@ -112,6 +114,12 @@ def _read_url_text(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "apache-incubator-releases-mcp/0.1.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def _read_text_source(location: str) -> str:
+    if _is_url(location):
+        return _read_url_text(location)
+    return Path(location).expanduser().read_text(encoding="utf-8", errors="replace")
 
 
 def _read_url_json(url: str) -> Any:
@@ -461,6 +469,192 @@ def incubating_hints(files: list[ReleaseFile]) -> dict[str, Any]:
     return {
         "artifact_naming": naming,
         "disclaimer_checks": local_disclaimers,
+        "hints": hints,
+    }
+
+
+def _plain_text_from_html(value: str) -> str:
+    return html.unescape(HTML_TAG_RE.sub(" ", value)).strip()
+
+
+def _release_page_links(page_text: str, page_url: str) -> list[dict[str, Any]]:
+    links = []
+    for match in HTML_ANCHOR_RE.finditer(page_text):
+        href = html.unescape(match.group(1)).strip()
+        if not href or href.startswith("#"):
+            continue
+        resolved = href if href.startswith("[preferred]") else urllib.parse.urljoin(page_url, href)
+        parsed = urllib.parse.urlparse(resolved)
+        links.append(
+            {
+                "href": href,
+                "resolved": resolved,
+                "text": _plain_text_from_html(match.group(2)),
+                "scheme": parsed.scheme or None,
+                "host": parsed.netloc or None,
+                "path": urllib.parse.unquote(parsed.path),
+                "uses_closer_lua": "/dyn/closer.lua/" in parsed.path,
+                "uses_preferred_variable": href.startswith("[preferred]/"),
+                "is_https_downloads_apache": parsed.scheme == "https"
+                and parsed.netloc == "downloads.apache.org",
+                "is_direct_dist_apache": parsed.netloc == "dist.apache.org",
+            }
+        )
+    return links
+
+
+def _link_basename(link: dict[str, Any]) -> str:
+    path = str(link.get("path") or link.get("href") or "")
+    if link.get("uses_preferred_variable"):
+        path = str(link["href"])
+    return Path(path).name
+
+
+def _is_top_level_closer_link(link: dict[str, Any], podling: str) -> bool:
+    if not link["uses_closer_lua"]:
+        return False
+    parsed = urllib.parse.urlparse(str(link["resolved"]))
+    suffix = parsed.path.split("/dyn/closer.lua/", 1)[-1].strip("/")
+    parts = [part for part in suffix.split("/") if part]
+    return len(parts) <= 1 or (len(parts) == 2 and parts[0] == "incubator" and parts[1] == podling)
+
+
+def _has_verification_instructions(page_text: str, links: list[dict[str, Any]]) -> bool:
+    text = _plain_text_from_html(page_text).lower()
+    link_targets = " ".join(str(link["resolved"]).lower() for link in links)
+    verification_words = ("checksum", "sha", "signature", "pgp", "openpgp")
+    return (
+        ("verify" in text or "verification" in text)
+        and any(word in text for word in verification_words)
+    ) or "release-signing" in link_targets or "/dev/release" in link_targets
+
+
+def release_page_checks(
+    podling: str,
+    release_page_url: str,
+    files: list[ReleaseFile],
+) -> dict[str, Any]:
+    slug = podling_slug(podling)
+    try:
+        page_text = _read_text_source(release_page_url)
+    except Exception as exc:
+        return {
+            "guidelines": RELEASE_DOWNLOAD_PAGES_URL,
+            "location": release_page_url,
+            "available": False,
+            "error": _url_error_message(exc),
+            "links": [],
+            "facts": {},
+            "hints": ["Release download page could not be inspected."],
+        }
+
+    links = _release_page_links(page_text, release_page_url)
+    current_sources = [item for item in _source_artifacts(files) if item.source == "dist"]
+    current_artifact_names = {item.name for item in current_sources}
+    current_signature_names = {
+        item.name
+        for item in files
+        if item.source == "dist"
+        and item.kind == "signature"
+        and item.artifact_name in current_artifact_names
+    }
+    current_checksum_names = {
+        item.name
+        for item in files
+        if item.source == "dist"
+        and item.kind == "checksum"
+        and item.artifact_name in current_artifact_names
+    }
+    linked_names = {_link_basename(link) for link in links}
+    artifact_links = [
+        link
+        for link in links
+        if _link_basename(link) in current_artifact_names
+        or (
+            _kind(_link_basename(link)) in {"source_artifact", "artifact"}
+            and not link["is_https_downloads_apache"]
+        )
+    ]
+    closer_artifact_links = [
+        link
+        for link in artifact_links
+        if link["uses_closer_lua"] or link["uses_preferred_variable"]
+    ]
+    checksum_links = [link for link in links if _kind(_link_basename(link)) == "checksum"]
+    signature_links = [link for link in links if _kind(_link_basename(link)) == "signature"]
+    keys_links = [link for link in links if _link_basename(link).lower() in {"keys", "keys.txt"}]
+    bad_dist_links = [link for link in links if link["is_direct_dist_apache"]]
+    top_level_closer_links = [link for link in links if _is_top_level_closer_link(link, slug)]
+    verification_instructions = _has_verification_instructions(page_text, links)
+
+    facts = {
+        "link_count": len(links),
+        "current_source_artifacts": sorted(current_artifact_names),
+        "linked_current_source_artifacts": sorted(current_artifact_names & linked_names),
+        "linked_current_signatures": sorted(current_signature_names & linked_names),
+        "linked_current_checksums": sorted(current_checksum_names & linked_names),
+        "artifact_link_count": len(artifact_links),
+        "closer_artifact_link_count": len(closer_artifact_links),
+        "checksum_link_count": len(checksum_links),
+        "signature_link_count": len(signature_links),
+        "keys_link_count": len(keys_links),
+        "has_https_downloads_keys_link": any(
+            link["is_https_downloads_apache"] for link in keys_links
+        ),
+        "all_checksum_links_use_https_downloads": all(
+            link["is_https_downloads_apache"] for link in checksum_links
+        )
+        if checksum_links
+        else False,
+        "all_signature_links_use_https_downloads": all(
+            link["is_https_downloads_apache"] for link in signature_links
+        )
+        if signature_links
+        else False,
+        "has_direct_dist_apache_links": bool(bad_dist_links),
+        "has_top_level_closer_lua_links": bool(top_level_closer_links),
+        "has_verification_instructions": verification_instructions,
+    }
+
+    hints: list[str] = []
+    if current_artifact_names and not current_artifact_names & linked_names:
+        hints.append(
+            "No current source distribution from downloads.apache.org/dist evidence "
+            "appears linked on the page."
+        )
+    if not closer_artifact_links:
+        hints.append("No release artifact links using closer.lua or [preferred] were found.")
+    if current_checksum_names and not current_checksum_names & linked_names:
+        hints.append("No checksum links were found for the current source distributions.")
+    if checksum_links and not facts["all_checksum_links_use_https_downloads"]:
+        hints.append("Some checksum links do not use https://downloads.apache.org/.")
+    if current_signature_names and not current_signature_names & linked_names:
+        hints.append("No detached signature links were found for the current source distributions.")
+    if signature_links and not facts["all_signature_links_use_https_downloads"]:
+        hints.append("Some detached signature links do not use https://downloads.apache.org/.")
+    if not facts["has_https_downloads_keys_link"]:
+        hints.append("No HTTPS KEYS link to downloads.apache.org was found.")
+    if bad_dist_links:
+        hints.append(
+            "The page links directly to dist.apache.org; download pages should use "
+            "closer.lua for artifacts."
+        )
+    if top_level_closer_links:
+        hints.append(
+            "The page links to a top-level closer.lua project path instead of a "
+            "release artifact path."
+        )
+    if not verification_instructions:
+        hints.append(
+            "No visible instructions or documentation link for verifying downloads was found."
+        )
+
+    return {
+        "guidelines": RELEASE_DOWNLOAD_PAGES_URL,
+        "location": release_page_url,
+        "available": True,
+        "links": links,
+        "facts": facts,
         "hints": hints,
     }
 
@@ -1103,6 +1297,7 @@ def release_overview(
     dist_base: str = DEFAULT_DIST_BASE,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
     max_depth: int = 1,
+    release_page_url: str | None = None,
     include_platforms: bool = False,
     github_project: str | None = None,
     docker_images: list[str] | None = None,
@@ -1132,6 +1327,8 @@ def release_overview(
         "checksum_count": sum(1 for item in files if item.kind == "checksum"),
         "incubating_hints": incubating_hints(files),
     }
+    if release_page_url:
+        result["release_page_checks"] = release_page_checks(podling, release_page_url, files)
     if include_platforms:
         result["platform_distribution_checks"] = platform_distribution_checks(
             podling,

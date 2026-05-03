@@ -37,6 +37,66 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertEqual(len(latest["checksums"]), 1)
         self.assertTrue(result["incubating_hints"]["disclaimer_checks"][0]["has_disclaimer_file"])
 
+    def test_release_page_checks_accept_compliant_download_page(self) -> None:
+        with release_dirs() as (dist, archive):
+            page = dist.parent / "download.html"
+            source = "apache-alpha-1.1.0-incubating-source-release.zip"
+            page.write_text(
+                f"""\
+<html><body>
+  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
+  <a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>
+  <a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>
+  <a href="https://downloads.apache.org/incubator/alpha/KEYS">KEYS</a>
+  Please verify downloads with checksums and OpenPGP signatures.
+</body></html>
+""",
+                encoding="utf-8",
+            )
+
+            result = releases.release_overview(
+                "alpha",
+                dist_base=str(dist),
+                archive_base=str(archive),
+                release_page_url=str(page),
+            )
+
+        checks = result["release_page_checks"]
+        self.assertTrue(checks["available"])
+        self.assertEqual(checks["guidelines"], releases.RELEASE_DOWNLOAD_PAGES_URL)
+        self.assertFalse(checks["hints"])
+        self.assertTrue(checks["facts"]["has_https_downloads_keys_link"])
+        self.assertTrue(checks["facts"]["has_verification_instructions"])
+
+    def test_release_page_checks_flag_download_page_hints(self) -> None:
+        with release_dirs() as (dist, archive):
+            page = dist.parent / "bad-download.html"
+            source = "apache-alpha-1.1.0-incubating-source-release.zip"
+            page.write_text(
+                f"""\
+<html><body>
+  <a href="https://dist.apache.org/repos/dist/release/incubator/alpha/{source}">Source</a>
+  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha">Downloads</a>
+  <a href="http://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>
+</body></html>
+""",
+                encoding="utf-8",
+            )
+
+            result = releases.release_overview(
+                "alpha",
+                dist_base=str(dist),
+                archive_base=str(archive),
+                release_page_url=str(page),
+            )
+
+        hints = " ".join(result["release_page_checks"]["hints"])
+        self.assertIn("directly to dist.apache.org", hints)
+        self.assertIn("top-level closer.lua", hints)
+        self.assertIn("detached signature", hints)
+        self.assertIn("KEYS", hints)
+        self.assertIn("verifying downloads", hints)
+
     def test_collect_files_reports_missing_source_directory(self) -> None:
         with release_dirs() as (dist, archive):
             result = releases.collect_files(

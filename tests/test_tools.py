@@ -33,6 +33,12 @@ class ToolsTests(unittest.TestCase):
             "boolean",
         )
         self.assertEqual(
+            tools.TOOLS["podling_releases"]["inputSchema"]["properties"][
+                "release_page_url"
+            ]["type"],
+            "string",
+        )
+        self.assertEqual(
             tools.TOOLS["podling_releases"]["inputSchema"]["properties"]["pypi_packages"]["type"],
             "array",
         )

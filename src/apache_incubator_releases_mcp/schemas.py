@@ -35,6 +35,12 @@ MAVEN_GROUP_IDS_PROPERTY = {
     "items": {"type": "string"},
     "description": "Optional Maven groupIds; defaults to org.apache.<podling>",
 }
+RELEASE_PAGE_URL_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Optional Apache project release download page URL or local HTML file to inspect"
+    ),
+}
 
 
 def input_schema(
@@ -68,6 +74,7 @@ def podling_release_properties() -> dict[str, Any]:
         "dist_base": DIST_BASE_PROPERTY,
         "archive_base": ARCHIVE_BASE_PROPERTY,
         "max_depth": MAX_DEPTH_PROPERTY,
+        "release_page_url": RELEASE_PAGE_URL_PROPERTY,
         "include_platforms": {
             "type": "boolean",
             "description": (

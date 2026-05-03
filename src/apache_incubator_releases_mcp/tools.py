@@ -75,6 +75,7 @@ def podling_releases(
     dist_base: str | None = None,
     archive_base: str | None = None,
     max_depth: int | None = None,
+    release_page_url: str | None = None,
     include_platforms: bool | None = None,
     github_project: str | None = None,
     docker_images: list[str] | None = None,
@@ -87,6 +88,7 @@ def podling_releases(
         dist_base=resolve_dist_base(dist_base),
         archive_base=resolve_archive_base(archive_base),
         max_depth=optional_depth(max_depth),
+        release_page_url=optional_string(release_page_url, "release_page_url"),
         include_platforms=optional_bool(include_platforms, "include_platforms"),
         github_project=optional_string(github_project, "github_project"),
         docker_images=optional_string_list(docker_images, "docker_images"),
@@ -99,8 +101,8 @@ TOOLS: dict[str, dict[str, Any]] = {
     "podling_releases": schemas.tool_definition(
         description=(
             "Return release artifact, signature, checksum, cadence, Incubator naming evidence, "
-            "and optional GitHub/Docker Hub/PyPI/Maven distribution checks for one Apache "
-            "Incubator podling."
+            "and optional release-page and GitHub/Docker Hub/PyPI/Maven distribution "
+            "checks for one Apache Incubator podling."
         ),
         handler=podling_releases,
         properties=schemas.podling_release_properties(),
