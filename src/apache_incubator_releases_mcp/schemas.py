@@ -38,7 +38,8 @@ MAVEN_GROUP_IDS_PROPERTY = {
 RELEASE_PAGE_URL_PROPERTY = {
     "type": "string",
     "description": (
-        "Optional Apache project release download page URL or local HTML file to inspect"
+        "Optional Apache project release download page URL or local HTML file to inspect; "
+        "when omitted, the server tries common apache.org download page locations"
     ),
 }
 

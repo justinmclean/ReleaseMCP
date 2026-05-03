@@ -97,6 +97,96 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertIn("KEYS", hints)
         self.assertIn("verifying downloads", hints)
 
+    def test_discovers_release_page_from_common_project_url(self) -> None:
+        with release_dirs() as (dist, archive):
+            collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
+            files = [releases.ReleaseFile(**item) for item in collected["files"]]
+        source = "apache-alpha-1.1.0-incubating-source-release.zip"
+        original = releases._read_url_text
+
+        def fake_read_url_text(url: str) -> str:
+            if url == "https://alpha.apache.org/downloads.html":
+                return f"""\
+<html><body>
+  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
+  <a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>
+</body></html>
+"""
+            raise OSError("not found")
+
+        releases._read_url_text = fake_read_url_text
+        try:
+            discovery = releases.discover_release_page_url("alpha", files)
+        finally:
+            releases._read_url_text = original
+
+        self.assertTrue(discovery["found"])
+        self.assertEqual(discovery["location"], "https://alpha.apache.org/downloads.html")
+
+    def test_discovers_release_page_from_homepage_download_link(self) -> None:
+        with release_dirs() as (dist, archive):
+            collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
+            files = [releases.ReleaseFile(**item) for item in collected["files"]]
+        source = "apache-alpha-1.1.0-incubating-source-release.zip"
+        original = releases._read_url_text
+
+        def fake_read_url_text(url: str) -> str:
+            if url == "https://alpha.apache.org/":
+                return '<html><body><a href="/get-alpha.html">Downloads</a></body></html>'
+            if url == "https://alpha.apache.org/get-alpha.html":
+                return f"""\
+<html><body>
+  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
+  <a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>
+</body></html>
+"""
+            raise OSError("not found")
+
+        releases._read_url_text = fake_read_url_text
+        try:
+            discovery = releases.discover_release_page_url("alpha", files)
+        finally:
+            releases._read_url_text = original
+
+        self.assertTrue(discovery["found"])
+        self.assertEqual(discovery["location"], "https://alpha.apache.org/get-alpha.html")
+        self.assertIn("https://alpha.apache.org/", discovery["attempted"])
+
+    def test_release_overview_checks_discovered_release_page(self) -> None:
+        with release_dirs() as (dist, archive):
+            collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
+        source = "apache-alpha-1.1.0-incubating-source-release.zip"
+        original_collect_files = releases.collect_files
+        original_read_url_text = releases._read_url_text
+
+        def fake_read_url_text(url: str) -> str:
+            if url == "https://alpha.apache.org/downloads.html":
+                return f"""\
+<html><body>
+  <a href="https://www.apache.org/dyn/closer.lua/incubator/alpha/{source}">Source</a>
+  <a href="https://downloads.apache.org/incubator/alpha/{source}.asc">PGP</a>
+  <a href="https://downloads.apache.org/incubator/alpha/{source}.sha512">SHA512</a>
+  <a href="https://downloads.apache.org/incubator/alpha/KEYS">KEYS</a>
+  Please verify downloads with checksums and OpenPGP signatures.
+</body></html>
+"""
+            raise OSError("not found")
+
+        releases.collect_files = lambda *args, **kwargs: collected
+        releases._read_url_text = fake_read_url_text
+        try:
+            result = releases.release_overview("alpha")
+        finally:
+            releases.collect_files = original_collect_files
+            releases._read_url_text = original_read_url_text
+
+        self.assertTrue(result["release_page_discovery"]["found"])
+        self.assertEqual(
+            result["release_page_checks"]["location"],
+            "https://alpha.apache.org/downloads.html",
+        )
+        self.assertFalse(result["release_page_checks"]["hints"])
+
     def test_collect_files_reports_missing_source_directory(self) -> None:
         with release_dirs() as (dist, archive):
             result = releases.collect_files(

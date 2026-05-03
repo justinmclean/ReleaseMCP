@@ -8,7 +8,7 @@ It checks:
 - last release date and observed cadence
 - source artifacts, detached signatures, and checksum sidecars
 - Incubating naming and disclaimer hints
-- optional Apache release download page checks against ASF Infra guidance
+- optional Apache release download page discovery and checks against ASF Infra guidance
 - optional GitHub, Docker Hub, PyPI, and Maven distribution hints against the ASF Incubator distribution guide
 
 ## Requirements
@@ -112,7 +112,9 @@ Arguments:
 - `dist_base`: optional `dist.apache.org` base URL or local release directory
 - `archive_base`: optional `archive.apache.org` base URL or local archive directory
 - `max_depth`: optional traversal depth under the podling directory, either `0` or `1`; defaults to `1`
-- `release_page_url`: optional Apache project release download page URL or local HTML file to inspect
+- `release_page_url`: optional Apache project release download page URL or local HTML file to inspect; when omitted with
+  the default remote Apache release sources, the server tries common `https://<podling>.apache.org/` download page
+  locations and homepage download/release links
 - `include_platforms`: optional boolean; when true, fetches GitHub releases, Docker Hub metadata, PyPI metadata, and
   Maven Central metadata
 - `github_project`: optional apache/<project> GitHub repository name; defaults to the podling slug

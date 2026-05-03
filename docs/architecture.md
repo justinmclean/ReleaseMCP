@@ -40,10 +40,12 @@ checksums. Cadence is derived from listing or filesystem modification dates when
 Incubating hints are intentionally evidence-oriented. The server checks whether source artifact names include
 `incubating`; when artifacts are local and inspectable, it also looks for a `DISCLAIMER` file inside source archives.
 
-When callers pass `release_page_url`, the server reads that Apache project download page and extracts links. It reports
-observed facts separately from hints for ASF Infra release download page guidance, including `closer.lua` artifact links,
-HTTPS `downloads.apache.org` checksum/signature/KEYS links, direct `dist.apache.org` links, top-level `closer.lua` links,
-and visible verification instructions.
+When callers pass `release_page_url`, the server reads that Apache project download page and extracts links. If callers
+omit it while using remote Apache release sources, the server tries common `https://<podling>.apache.org/` download page
+paths and homepage download/release links, then checks the first page that looks like a release page. It reports observed
+facts separately from hints for ASF Infra release download page guidance, including `closer.lua` artifact links, HTTPS
+`downloads.apache.org` checksum/signature/KEYS links, direct `dist.apache.org` links, top-level `closer.lua` links, and
+visible verification instructions.
 
 Optional platform distribution checks inspect GitHub releases, Docker Hub repository metadata, PyPI project metadata, and
 Maven Central metadata when callers pass `include_platforms`. These checks cite the ASF Incubator distribution guide and

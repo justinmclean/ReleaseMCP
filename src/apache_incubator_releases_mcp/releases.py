@@ -25,6 +25,14 @@ MAVEN_ARTIFACT_LIMIT = 25
 MAVEN_VERSION_LIMIT = 20
 DISTRIBUTION_GUIDELINES_URL = "https://incubator.apache.org/guides/distribution.html"
 RELEASE_DOWNLOAD_PAGES_URL = "https://infra.apache.org/release-download-pages.html"
+RELEASE_PAGE_PATHS = (
+    "downloads.html",
+    "download.html",
+    "downloads/",
+    "download/",
+    "releases.html",
+    "releases/",
+)
 ARCHIVE_SUFFIXES = (
     ".tar.gz",
     ".tar.bz2",
@@ -501,6 +509,74 @@ def _release_page_links(page_text: str, page_url: str) -> list[dict[str, Any]]:
             }
         )
     return links
+
+
+def _is_release_page_candidate(page_text: str, page_url: str, files: list[ReleaseFile]) -> bool:
+    links = _release_page_links(page_text, page_url)
+    text = _plain_text_from_html(page_text).lower()
+    current_artifact_names = {item.name for item in _source_artifacts(files) if item.source == "dist"}
+    linked_names = {_link_basename(link) for link in links}
+    has_known_artifact = bool(current_artifact_names & linked_names)
+    has_release_link = any(
+        link["uses_closer_lua"] or link["uses_preferred_variable"] or link["is_https_downloads_apache"]
+        for link in links
+    )
+    has_download_text = "download" in text or "release" in text
+    has_verification_hint = any(word in text for word in ("checksum", "signature", "pgp", "sha"))
+    return has_known_artifact or (has_release_link and (has_download_text or has_verification_hint))
+
+
+def _homepage_release_links(homepage_text: str, homepage_url: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for link in _release_page_links(homepage_text, homepage_url):
+        haystack = f"{link['href']} {link['text']}".lower()
+        if "download" not in haystack and "release" not in haystack:
+            continue
+        resolved = str(link["resolved"])
+        if urllib.parse.urlparse(resolved).scheme not in {"http", "https"}:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            urls.append(resolved)
+    return urls
+
+
+def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[str, Any]:
+    slug = podling_slug(podling)
+    base_url = f"https://{slug}.apache.org/"
+    candidates = [urllib.parse.urljoin(base_url, path) for path in RELEASE_PAGE_PATHS]
+    attempted: list[str] = []
+    errors: dict[str, str] = {}
+
+    def inspect(url: str) -> str | None:
+        if url in attempted:
+            return None
+        attempted.append(url)
+        try:
+            page_text = _read_url_text(url)
+        except Exception as exc:
+            errors[url] = _url_error_message(exc)
+            return None
+        if _is_release_page_candidate(page_text, url, files):
+            return url
+        return None
+
+    for candidate in candidates:
+        if found := inspect(candidate):
+            return {"found": True, "location": found, "attempted": attempted, "errors": errors}
+
+    try:
+        homepage_text = _read_url_text(base_url)
+    except Exception as exc:
+        errors[base_url] = _url_error_message(exc)
+    else:
+        attempted.append(base_url)
+        for candidate in _homepage_release_links(homepage_text, base_url):
+            if found := inspect(candidate):
+                return {"found": True, "location": found, "attempted": attempted, "errors": errors}
+
+    return {"found": False, "location": None, "attempted": attempted, "errors": errors}
 
 
 def _link_basename(link: dict[str, Any]) -> str:
@@ -1327,8 +1403,14 @@ def release_overview(
         "checksum_count": sum(1 for item in files if item.kind == "checksum"),
         "incubating_hints": incubating_hints(files),
     }
-    if release_page_url:
-        result["release_page_checks"] = release_page_checks(podling, release_page_url, files)
+    resolved_release_page_url = release_page_url
+    if not resolved_release_page_url and _is_url(dist_base):
+        discovery = discover_release_page_url(podling, files)
+        result["release_page_discovery"] = discovery
+        if discovery["found"]:
+            resolved_release_page_url = str(discovery["location"])
+    if resolved_release_page_url:
+        result["release_page_checks"] = release_page_checks(podling, resolved_release_page_url, files)
     if include_platforms:
         result["platform_distribution_checks"] = platform_distribution_checks(
             podling,
