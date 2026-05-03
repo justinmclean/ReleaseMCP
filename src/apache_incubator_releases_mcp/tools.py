@@ -62,8 +62,8 @@ def optional_string_list(value: Any, key: str) -> list[str] | None:
     return [require_non_empty_string(item, key) for item in value]
 
 
-def resolve_dist_base(value: str | None = None) -> str:
-    return optional_string(value, "dist_base") or _CONFIGURED_DIST_BASE or releases.DEFAULT_DIST_BASE
+def resolve_dist_base(value: str | None = None) -> str | None:
+    return optional_string(value, "dist_base") or _CONFIGURED_DIST_BASE
 
 
 def resolve_archive_base(value: str | None = None) -> str:

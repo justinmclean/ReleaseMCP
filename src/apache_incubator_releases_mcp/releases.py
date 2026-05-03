@@ -309,15 +309,14 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
 def collect_files(
     podling: str,
     *,
-    dist_base: str = DEFAULT_DIST_BASE,
+    dist_base: str | None = DEFAULT_DIST_BASE,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
     max_depth: int = 1,
 ) -> dict[str, Any]:
     slug = podling_slug(podling)
-    sources = {
-        "dist": _join_source(dist_base, slug),
-        "archive": _join_source(archive_base, slug),
-    }
+    sources = {"archive": _join_source(archive_base, slug)}
+    if dist_base is not None:
+        sources = {"dist": _join_source(dist_base, slug), **sources}
     files: list[ReleaseFile] = []
     source_statuses: list[SourceStatus] = []
     for source, location in sources.items():
@@ -511,6 +510,64 @@ def _release_page_links(page_text: str, page_url: str) -> list[dict[str, Any]]:
     return links
 
 
+def _release_file_from_link(link: dict[str, Any], source: str) -> ReleaseFile | None:
+    name = _link_basename(link)
+    kind = _kind(name)
+    if kind == "other":
+        return None
+    return ReleaseFile(
+        name=name,
+        location=str(link["resolved"]),
+        source=source,
+        path=str(link["path"]).lstrip("/"),
+        kind=kind,
+        artifact_name=_artifact_name(name),
+        version=_version(name),
+    )
+
+
+def _release_page_files(podling: str, release_page_url: str) -> tuple[list[ReleaseFile], SourceStatus]:
+    try:
+        page_text = _read_text_source(release_page_url)
+    except Exception as exc:
+        return [], SourceStatus(
+            source="dist",
+            location=release_page_url,
+            available=False,
+            transport="http" if _is_url(release_page_url) else "local",
+            file_count=0,
+            error=_url_error_message(exc),
+        )
+
+    slug = podling_slug(podling)
+    files: list[ReleaseFile] = []
+    seen: set[str] = set()
+    for link in _release_page_links(page_text, release_page_url):
+        if not (
+            link["uses_closer_lua"]
+            or link["uses_preferred_variable"]
+            or link["is_https_downloads_apache"]
+        ):
+            continue
+        if link["uses_closer_lua"] and not _is_top_level_closer_link(link, slug):
+            pass
+        elif link["uses_closer_lua"]:
+            continue
+        file = _release_file_from_link(link, "dist")
+        if file is None or file.location in seen:
+            continue
+        seen.add(file.location)
+        files.append(file)
+
+    return files, SourceStatus(
+        source="dist",
+        location=release_page_url,
+        available=True,
+        transport="http" if _is_url(release_page_url) else "local",
+        file_count=len(files),
+    )
+
+
 def _is_release_page_candidate(page_text: str, page_url: str, files: list[ReleaseFile]) -> bool:
     links = _release_page_links(page_text, page_url)
     text = _plain_text_from_html(page_text).lower()
@@ -544,8 +601,12 @@ def _homepage_release_links(homepage_text: str, homepage_url: str) -> list[str]:
 
 def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[str, Any]:
     slug = podling_slug(podling)
-    base_url = f"https://{slug}.apache.org/"
-    candidates = [urllib.parse.urljoin(base_url, path) for path in RELEASE_PAGE_PATHS]
+    base_urls = [f"https://{slug}.incubator.apache.org/", f"https://{slug}.apache.org/"]
+    candidates = [
+        urllib.parse.urljoin(base_url, path)
+        for base_url in base_urls
+        for path in RELEASE_PAGE_PATHS
+    ]
     attempted: list[str] = []
     errors: dict[str, str] = {}
 
@@ -566,15 +627,16 @@ def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[st
         if found := inspect(candidate):
             return {"found": True, "location": found, "attempted": attempted, "errors": errors}
 
-    try:
-        homepage_text = _read_url_text(base_url)
-    except Exception as exc:
-        errors[base_url] = _url_error_message(exc)
-    else:
-        attempted.append(base_url)
-        for candidate in _homepage_release_links(homepage_text, base_url):
-            if found := inspect(candidate):
-                return {"found": True, "location": found, "attempted": attempted, "errors": errors}
+    for base_url in base_urls:
+        try:
+            homepage_text = _read_url_text(base_url)
+        except Exception as exc:
+            errors[base_url] = _url_error_message(exc)
+        else:
+            attempted.append(base_url)
+            for candidate in _homepage_release_links(homepage_text, base_url):
+                if found := inspect(candidate):
+                    return {"found": True, "location": found, "attempted": attempted, "errors": errors}
 
     return {"found": False, "location": None, "attempted": attempted, "errors": errors}
 
@@ -1370,7 +1432,7 @@ def platform_distribution_checks(
 def release_overview(
     podling: str,
     *,
-    dist_base: str = DEFAULT_DIST_BASE,
+    dist_base: str | None = None,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
     max_depth: int = 1,
     release_page_url: str | None = None,
@@ -1385,12 +1447,33 @@ def release_overview(
     maven_search_base: str = DEFAULT_MAVEN_SEARCH_BASE,
     maven_repository_base: str = DEFAULT_MAVEN_REPOSITORY_BASE,
 ) -> dict[str, Any]:
+    resolved_release_page_url = release_page_url
+    release_page_discovery = None
+    if dist_base is None and not resolved_release_page_url:
+        release_page_discovery = discover_release_page_url(podling, [])
+        if release_page_discovery["found"]:
+            resolved_release_page_url = str(release_page_discovery["location"])
+
     collected = collect_files(
         podling,
         dist_base=dist_base,
         archive_base=archive_base,
         max_depth=max_depth,
     )
+    if dist_base is None and resolved_release_page_url:
+        page_files, page_status = _release_page_files(podling, resolved_release_page_url)
+        collected["sources"] = {"dist": resolved_release_page_url, **collected["sources"]}
+        collected["source_statuses"] = [page_status.to_dict(), *collected["source_statuses"]]
+        existing_files = [ReleaseFile(**item) for item in collected["files"]]
+        unique = {
+            (item.source, item.location): item
+            for item in [*existing_files, *page_files]
+        }
+        collected["files"] = [
+            item.to_dict()
+            for item in sorted(unique.values(), key=lambda item: item.location)
+        ]
+        collected["count"] = len(unique)
     files = [ReleaseFile(**item) for item in collected["files"]]
     groups = _release_groups(files)
     result = {
@@ -1403,8 +1486,9 @@ def release_overview(
         "checksum_count": sum(1 for item in files if item.kind == "checksum"),
         "incubating_hints": incubating_hints(files),
     }
-    resolved_release_page_url = release_page_url
-    if not resolved_release_page_url and _is_url(dist_base):
+    if release_page_discovery is not None:
+        result["release_page_discovery"] = release_page_discovery
+    if not resolved_release_page_url and dist_base is not None and _is_url(dist_base):
         discovery = discover_release_page_url(podling, files)
         result["release_page_discovery"] = discovery
         if discovery["found"]:

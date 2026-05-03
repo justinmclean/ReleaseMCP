@@ -5,7 +5,10 @@ from typing import Any
 PODLING_PROPERTY = {"type": "string", "description": "Apache Incubator podling id or name"}
 DIST_BASE_PROPERTY = {
     "type": "string",
-    "description": "Optional dist.apache.org base URL or local release directory",
+    "description": (
+        "Optional current release directory base URL or local release directory; "
+        "when omitted, the server discovers the podling release download page"
+    ),
 }
 ARCHIVE_BASE_PROPERTY = {
     "type": "string",
@@ -39,7 +42,7 @@ RELEASE_PAGE_URL_PROPERTY = {
     "type": "string",
     "description": (
         "Optional Apache project release download page URL or local HTML file to inspect; "
-        "when omitted, the server tries common apache.org download page locations"
+        "when omitted, the server tries common incubator.apache.org and apache.org download page locations"
     ),
 }
 

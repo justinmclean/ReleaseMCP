@@ -4,7 +4,8 @@ A small MCP server for checking release evidence for one Apache Incubator podlin
 
 It checks:
 
-- release files for a named podling under `dist.apache.org` and `archive.apache.org`
+- current release files linked from the podling download page, or from an explicitly supplied current release directory
+- archived release files for a named podling under `archive.apache.org`
 - last release date and observed cadence
 - source artifacts, detached signatures, and checksum sidecars
 - Incubating naming and disclaimer hints
@@ -60,7 +61,7 @@ The server uses `stdio`, so it is intended to be launched by an MCP client.
 
 Configure startup defaults with command-line arguments:
 
-- `--dist-base`: optional `dist.apache.org` base URL or local release directory
+- `--dist-base`: optional current release base URL or local release directory; when omitted, the server discovers the podling download page instead of falling back to a default `dist.apache.org` path
 - `--archive-base`: optional `archive.apache.org` base URL or local archive directory
 
 Tool calls can override those defaults with `dist_base` and `archive_base`. The server does not scan all podlings; every
@@ -109,12 +110,12 @@ be read.
 Arguments:
 
 - `podling`: podling id or name
-- `dist_base`: optional `dist.apache.org` base URL or local release directory
+- `dist_base`: optional current release base URL or local release directory; when omitted, the server discovers the podling download page and uses its release links as current distribution evidence
 - `archive_base`: optional `archive.apache.org` base URL or local archive directory
 - `max_depth`: optional traversal depth under the podling directory, either `0` or `1`; defaults to `1`
-- `release_page_url`: optional Apache project release download page URL or local HTML file to inspect; when omitted with
-  the default remote Apache release sources, the server tries common `https://<podling>.apache.org/` download page
-  locations and homepage download/release links
+- `release_page_url`: optional Apache project release download page URL or local HTML file to inspect; when omitted and
+  `dist_base` is not configured, the server tries common `https://<podling>.incubator.apache.org/` and
+  `https://<podling>.apache.org/` download page locations and homepage download/release links
 - `include_platforms`: optional boolean; when true, fetches GitHub releases, Docker Hub metadata, PyPI metadata, and
   Maven Central metadata
 - `github_project`: optional apache/<project> GitHub repository name; defaults to the podling slug

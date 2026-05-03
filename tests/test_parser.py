@@ -187,6 +187,65 @@ class ReleaseParserTests(unittest.TestCase):
         )
         self.assertFalse(result["release_page_checks"]["hints"])
 
+    def test_release_overview_uses_discovered_incubator_download_page_as_dist_source(self) -> None:
+        with release_dirs() as (_dist, archive):
+            source = "apache-resilientdb-1.0.0-incubating-source-release.zip"
+            original_read_url_text = releases._read_url_text
+
+            def fake_read_url_text(url: str) -> str:
+                if url == "https://resilientdb.incubator.apache.org/download.html":
+                    return f"""\
+<html><body>
+  <a href="https://www.apache.org/dyn/closer.lua/incubator/resilientdb/{source}">Source</a>
+  <a href="https://downloads.apache.org/incubator/resilientdb/{source}.asc">PGP</a>
+  <a href="https://downloads.apache.org/incubator/resilientdb/{source}.sha512">SHA512</a>
+  <a href="https://downloads.apache.org/incubator/resilientdb/KEYS">KEYS</a>
+  Please verify downloads with checksums and OpenPGP signatures.
+</body></html>
+"""
+                raise OSError("not found")
+
+            releases._read_url_text = fake_read_url_text
+            try:
+                result = releases.release_overview("resilientdb", archive_base=str(archive))
+            finally:
+                releases._read_url_text = original_read_url_text
+
+        self.assertEqual(
+            result["sources"]["dist"],
+            "https://resilientdb.incubator.apache.org/download.html",
+        )
+        self.assertTrue(result["release_page_discovery"]["found"])
+        self.assertEqual(result["source_artifact_count"], 1)
+        self.assertEqual(result["signature_count"], 1)
+        self.assertEqual(result["checksum_count"], 1)
+        self.assertEqual(
+            result["release_page_checks"]["location"],
+            "https://resilientdb.incubator.apache.org/download.html",
+        )
+
+    def test_release_overview_without_dist_base_does_not_fall_back_to_default_svn_dist(self) -> None:
+        with release_dirs() as (dist, archive):
+            original_collect_url = releases._collect_url
+            calls: list[str] = []
+
+            def fake_collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = None):
+                calls.append(url)
+                return original_collect_url(url, source, max_depth, seen)
+
+            releases._collect_url = fake_collect_url
+            try:
+                result = releases.release_overview(
+                    "alpha",
+                    archive_base=str(archive),
+                    release_page_url=str(dist.parent / "missing-download.html"),
+                )
+            finally:
+                releases._collect_url = original_collect_url
+
+        self.assertEqual(result["sources"]["dist"], str(dist.parent / "missing-download.html"))
+        self.assertFalse(any(url.startswith(releases.DEFAULT_DIST_BASE) for url in calls))
+
     def test_collect_files_reports_missing_source_directory(self) -> None:
         with release_dirs() as (dist, archive):
             result = releases.collect_files(
