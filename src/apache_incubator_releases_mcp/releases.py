@@ -30,12 +30,9 @@ MAVEN_VERSION_LIMIT = 20
 DISTRIBUTION_GUIDELINES_URL = "https://incubator.apache.org/guides/distribution.html"
 RELEASE_DOWNLOAD_PAGES_URL = "https://infra.apache.org/release-download-pages.html"
 RELEASE_PAGE_PATHS = (
-    "downloads.html",
-    "download.html",
-    "downloads/",
     "download/",
-    "releases.html",
     "releases/",
+    "downloads/",
 )
 ARCHIVE_SUFFIXES = (
     ".tar.gz",
@@ -80,6 +77,7 @@ class _HtmlLinkScanner(HTMLParser):
     convert_charrefs = True
     _SKIP_TAGS = frozenset({"script", "style", "noscript"})
     _MAX_VISIBLE = 256 * 1024  # 256 KB is more than enough for keyword detection
+    _MAX_LINKS = 2000  # cap link list; no release directory or download page needs more
 
     def __init__(self) -> None:
         super().__init__()
@@ -102,7 +100,7 @@ class _HtmlLinkScanner(HTMLParser):
         if self._skip_depth:
             return
         self._flush_pending()
-        if lower == "a":
+        if lower == "a" and len(self.links) < self._MAX_LINKS:
             self._href = dict(attrs).get("href") or ""
             self._text = []
 
@@ -812,21 +810,6 @@ def _is_release_page_candidate(
     return has_known_artifact or (has_release_link and (has_download_text or has_verification_hint))
 
 
-def _homepage_release_links(links: list[dict[str, Any]]) -> list[str]:
-    urls: list[str] = []
-    seen: set[str] = set()
-    for link in links:
-        haystack = f"{link['href']} {link['text']}".lower()
-        if "download" not in haystack and "release" not in haystack:
-            continue
-        resolved = str(link["resolved"])
-        if urllib.parse.urlparse(resolved).scheme not in {"http", "https"}:
-            continue
-        if resolved not in seen:
-            seen.add(resolved)
-            urls.append(resolved)
-    return urls
-
 
 def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[str, Any]:
     slug = podling_slug(podling)
@@ -839,35 +822,18 @@ def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[st
     attempted: list[str] = []
     errors: dict[str, str] = {}
 
-    def inspect(url: str) -> str | None:
-        if url in attempted:
-            return None
-        attempted.append(url)
-        try:
-            raw_links, visible_text = _scan_url_page(url)
-        except Exception as exc:
-            errors[url] = _url_error_message(exc)
-            return None
-        page_links = _build_page_links(raw_links, url)
-        if _is_release_page_candidate(page_links, visible_text, files):
-            return url
-        return None
-
     for candidate in candidates:
-        if found := inspect(candidate):
-            return {"found": True, "location": found, "attempted": attempted, "errors": errors}
-
-    for base_url in base_urls:
+        if candidate in attempted:
+            continue
+        attempted.append(candidate)
         try:
-            raw_links, _ = _scan_url_page(base_url)
+            raw_links, visible_text = _scan_url_page(candidate)
         except Exception as exc:
-            errors[base_url] = _url_error_message(exc)
-        else:
-            attempted.append(base_url)
-            page_links = _build_page_links(raw_links, base_url)
-            for candidate in _homepage_release_links(page_links):
-                if found := inspect(candidate):
-                    return {"found": True, "location": found, "attempted": attempted, "errors": errors}
+            errors[candidate] = _url_error_message(exc)
+            continue
+        page_links = _build_page_links(raw_links, candidate)
+        if _is_release_page_candidate(page_links, visible_text, files):
+            return {"found": True, "location": candidate, "attempted": attempted, "errors": errors}
 
     return {"found": False, "location": None, "attempted": attempted, "errors": errors}
 
