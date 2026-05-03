@@ -69,39 +69,70 @@ INCUBATOR_DISCLAIMER_RE = re.compile(
 
 
 class _HtmlLinkScanner(HTMLParser):
-    """Streaming HTML parser: accumulates (href, anchor_text, tail_text) tuples and visible text."""
+    """Streaming HTML parser: accumulates (href, anchor_text, tail_text) tuples and visible text.
+
+    Skips the bodies of <script>, <style>, and <noscript> tags entirely so that
+    inline JavaScript or CSS (which can be megabytes) is never buffered.
+    Visible text is also capped at _MAX_VISIBLE bytes so that text-heavy pages
+    don't exhaust memory during keyword scanning.
+    """
 
     convert_charrefs = True
+    _SKIP_TAGS = frozenset({"script", "style", "noscript"})
+    _MAX_VISIBLE = 256 * 1024  # 256 KB is more than enough for keyword detection
 
     def __init__(self) -> None:
         super().__init__()
         self.links: list[tuple[str, str, str]] = []
         self._visible: list[str] = []
+        self._visible_len: int = 0
         self._href: str | None = None
         self._text: list[str] = []
         self._pending_href: str | None = None
         self._pending_text: str | None = None
         self._tail: list[str] = []
+        self._tail_len: int = 0
+        self._skip_depth: int = 0  # nesting depth inside script/style/noscript
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if lower in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
         self._flush_pending()
-        if tag.lower() == "a":
+        if lower == "a":
             self._href = dict(attrs).get("href") or ""
             self._text = []
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "a" and self._href is not None:
+        lower = tag.lower()
+        if lower in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if self._skip_depth:
+            return
+        if lower == "a" and self._href is not None:
             self._pending_href = self._href
             self._pending_text = "".join(self._text)
             self._tail = []
+            self._tail_len = 0
             self._href = None
 
     def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return  # discard script/style/noscript bodies immediately
         if self._href is not None:
             self._text.append(data)
         elif self._pending_href is not None:
-            self._tail.append(data)
-        self._visible.append(data)
+            # Tail text is only used for date/size in directory listings; 1 KB is plenty.
+            if self._tail_len < 1024:
+                self._tail.append(data)
+                self._tail_len += len(data)
+        if self._visible_len < self._MAX_VISIBLE:
+            self._visible.append(data)
+            self._visible_len += len(data)
 
     def _flush_pending(self) -> None:
         if self._pending_href is not None:
@@ -109,6 +140,7 @@ class _HtmlLinkScanner(HTMLParser):
             self._pending_href = None
             self._pending_text = None
             self._tail = []
+            self._tail_len = 0
 
     def close(self) -> None:
         self._flush_pending()
