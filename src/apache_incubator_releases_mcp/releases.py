@@ -30,9 +30,16 @@ MAVEN_VERSION_LIMIT = 20
 DISTRIBUTION_GUIDELINES_URL = "https://incubator.apache.org/guides/distribution.html"
 RELEASE_DOWNLOAD_PAGES_URL = "https://infra.apache.org/release-download-pages.html"
 RELEASE_PAGE_PATHS = (
-    "download/",
-    "releases/",
+    "downloads.html",
+    "download.html",
     "downloads/",
+    "download/",
+    "releases.html",
+    "releases/",
+    "docs/download/",
+    "docs/downloads/",
+    "en/download/",
+    "en/downloads/",
 )
 ARCHIVE_SUFFIXES = (
     ".tar.gz",

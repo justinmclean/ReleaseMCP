@@ -114,8 +114,8 @@ Arguments:
 - `archive_base`: optional `archive.apache.org` base URL or local archive directory
 - `max_depth`: optional traversal depth under the podling directory, either `0` or `1`; defaults to `1`
 - `release_page_url`: optional Apache project release download page URL or local HTML file to inspect; when omitted and
-  `dist_base` is not configured, the server tries common `https://<podling>.incubator.apache.org/` and
-  `https://<podling>.apache.org/` download page locations and homepage download/release links
+  `dist_base` is not configured, the server tries a bounded list of observed
+  `https://<podling>.apache.org/` download/release page paths
 - `include_platforms`: optional boolean; when true, fetches GitHub releases, Docker Hub metadata, PyPI metadata, and
   Maven Central metadata
 - `github_project`: optional apache/<project> GitHub repository name; defaults to the podling slug

@@ -42,7 +42,7 @@ RELEASE_PAGE_URL_PROPERTY = {
     "type": "string",
     "description": (
         "Optional Apache project release download page URL or local HTML file to inspect; "
-        "when omitted, the server tries common incubator.apache.org and apache.org download page locations"
+        "when omitted, the server tries bounded apache.org download/release page paths"
     ),
 }
 

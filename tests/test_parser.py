@@ -128,7 +128,7 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertTrue(discovery["found"])
         self.assertEqual(discovery["location"], "https://alpha.apache.org/download/")
 
-    def test_discovers_release_page_only_checks_standard_paths(self) -> None:
+    def test_discovers_release_page_only_checks_bounded_project_paths(self) -> None:
         with release_dirs() as (dist, archive):
             collected = releases.collect_files("alpha", dist_base=str(dist), archive_base=str(archive))
             files = [releases.ReleaseFile(**item) for item in collected["files"]]
@@ -146,7 +146,7 @@ class ReleaseParserTests(unittest.TestCase):
             releases._scan_url_page = original
 
         self.assertFalse(discovery["found"])
-        # Only standard path candidates — no homepage, no incubator subdomain
+        # Only bounded path candidates -- no homepage, no incubator subdomain.
         self.assertEqual(attempted_urls, [f"https://alpha.apache.org/{p}" for p in releases.RELEASE_PAGE_PATHS])
         self.assertFalse(any("incubator.apache.org" in u for u in attempted_urls))
 
