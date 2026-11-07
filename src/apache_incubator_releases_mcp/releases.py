@@ -51,7 +51,18 @@ ARCHIVE_SUFFIXES = (
 CHECKSUM_SUFFIXES = (".sha512", ".sha256", ".sha1", ".md5")
 SIGNATURE_SUFFIXES = (".asc", ".sig")
 SIDE_SUFFIXES = SIGNATURE_SUFFIXES + CHECKSUM_SUFFIXES
-VERSION_RE = re.compile(r"(?<!\d)v?(\d+(?:[._-]\d+)+(?:[-._][A-Za-z0-9]+)*)")
+# A version is its numbers plus release qualifiers ("0.5.0-incubating",
+# "1.2.0-rc1", "2.0.0-M1"). Classifiers after it ("-src", "-bin", "-py3")
+# and the archive suffix are not part of it.
+VERSION_RE = re.compile(
+    r"(?<!\d)v?(\d+(?:[._-]\d+)+(?:[-._](?:incubating|rc\d+|alpha\d*|beta\d*|m\d+))*)",
+    re.IGNORECASE,
+)
+# Release trees are at most <version>/<subproject>/<file> (Toree keeps
+# 0.5.0-incubating/toree/ and 0.5.0-incubating/toree-pip/), so two levels
+# below the podling directory reach every file.
+DEFAULT_MAX_DEPTH = 2
+MAX_ALLOWED_DEPTH = 2
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}))?\b")
 UNAPPROVED_TAG_RE = re.compile(
@@ -437,6 +448,11 @@ def _kind(name: str) -> str:
 
 
 def _version(name: str) -> str | None:
+    lower = name.lower()
+    for suffix in SIDE_SUFFIXES + ARCHIVE_SUFFIXES:
+        if lower.endswith(suffix):
+            name = name[: -len(suffix)]
+            lower = name.lower()
     match = VERSION_RE.search(name)
     if not match:
         return None
@@ -494,6 +510,15 @@ def _url_error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _incomplete_listing_error(child_errors: list[str], *, top_level: bool) -> str | None:
+    if not child_errors:
+        return None
+    joined = "; ".join(child_errors)
+    if top_level:
+        return f"Some subdirectories could not be read, so the listing may be incomplete: {joined}"
+    return joined
+
+
 def _collect_url(
     url: str,
     source: str,
@@ -527,14 +552,22 @@ def _collect_url(
             error=_url_error_message(exc),
         )
     files: list[ReleaseFile] = []
+    # A subdirectory that cannot be read must not look like an empty one.
+    child_errors: list[str] = []
     for href, label, tail in raw_links:
         if href.startswith("?") or href.startswith("#") or href in {"../", "/"}:
             continue
         full = urllib.parse.urljoin(url, href)
         if href.endswith("/"):
             if max_depth > 0 and full.startswith(root) and full != root:
-                child_files, _ = _collect_url(full, source, max_depth - 1, seen, root)
+                child_files, child_status = _collect_url(full, source, max_depth - 1, seen, root)
                 files.extend(child_files)
+                if child_status.error:
+                    child_errors.append(
+                        child_status.error
+                        if child_status.available
+                        else f"{child_status.location}: {child_status.error}"
+                    )
             continue
         name = urllib.parse.unquote(Path(urllib.parse.urlparse(full).path).name)
         last_modified, size = _parse_listing_tail(tail)
@@ -557,6 +590,7 @@ def _collect_url(
         available=True,
         transport="http",
         file_count=len(files),
+        error=_incomplete_listing_error(child_errors, top_level=url == root),
     )
 
 
@@ -565,7 +599,7 @@ def collect_files(
     *,
     dist_base: str | None = DEFAULT_DIST_BASE,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
-    max_depth: int = 1,
+    max_depth: int = DEFAULT_MAX_DEPTH,
 ) -> dict[str, Any]:
     slug = podling_slug(podling)
     sources = {"archive": _join_source(archive_base, slug)}
@@ -1641,7 +1675,7 @@ def release_overview(
     *,
     dist_base: str | None = None,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
-    max_depth: int = 1,
+    max_depth: int = DEFAULT_MAX_DEPTH,
     release_page_url: str | None = None,
     include_platforms: bool = False,
     github_project: str | None = None,
@@ -1686,7 +1720,7 @@ def _release_overview_impl(
     *,
     dist_base: str | None = None,
     archive_base: str = DEFAULT_ARCHIVE_BASE,
-    max_depth: int = 1,
+    max_depth: int = DEFAULT_MAX_DEPTH,
     release_page_url: str | None = None,
     include_platforms: bool = False,
     github_project: str | None = None,

@@ -36,13 +36,16 @@ def optional_string(value: Any, key: str) -> str | None:
 
 def optional_depth(value: Any) -> int:
     if value is None:
-        return 1
+        return releases.DEFAULT_MAX_DEPTH
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError("'max_depth' must be an integer")
     if value < 0:
         raise ValueError("'max_depth' must be greater than or equal to 0")
-    if value > 1:
-        raise ValueError("'max_depth' must be 0 or 1 to keep checks scoped to one podling")
+    if value > releases.MAX_ALLOWED_DEPTH:
+        raise ValueError(
+            f"'max_depth' must be between 0 and {releases.MAX_ALLOWED_DEPTH} "
+            "to keep checks scoped to one podling"
+        )
     return value
 
 

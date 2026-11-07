@@ -16,7 +16,10 @@ ARCHIVE_BASE_PROPERTY = {
 }
 MAX_DEPTH_PROPERTY = {
     "type": "integer",
-    "description": "Maximum traversal depth under the podling directory; defaults to 1",
+    "description": (
+        "Maximum traversal depth under the podling directory, 0 to 2; "
+        "defaults to 2, which reaches <version>/<subproject>/<file>"
+    ),
 }
 BOOLEAN_PROPERTY = {"type": "boolean", "description": "Optional boolean flag"}
 GITHUB_PROJECT_PROPERTY = {
