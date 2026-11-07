@@ -82,6 +82,18 @@ python3 -m coverage report -m
 
 Coverage is scoped to the local `apache_incubator_releases_mcp` package.
 
+## Skill
+
+The repository ships a Claude skill that drives this server. Build the bundle
+with:
+
+```bash
+make skill
+```
+
+That packages `skill/incubator-releases/` into `incubator-releases.skill`. Run
+`make skill-check` to validate the source without building.
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the module layout, runtime flow, and parsing model.

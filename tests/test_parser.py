@@ -213,6 +213,59 @@ class ReleaseParserTests(unittest.TestCase):
         self.assertEqual(result["sources"]["dist"], str(dist.parent / "missing-download.html"))
         self.assertFalse(any(url.startswith(releases.DEFAULT_DIST_BASE) for url in calls))
 
+    def test_collect_url_only_follows_directories_below_the_podling_listing(self) -> None:
+        root = "https://archive.example/dist/incubator/alpha/"
+        pages = {
+            root: [
+                ("../", "Parent Directory", ""),
+                ("/dist/incubator/", "incubator", ""),
+                ("https://downloads.example/", "downloads", ""),
+                ("http://archive.example/dist/incubator/alpha/", "http copy", ""),
+                ("1.0.0/", "1.0.0/", ""),
+            ],
+            root + "1.0.0/": [
+                ("apache-alpha-1.0.0-incubating-src.tar.gz", "src", "2026-01-02 10:00  1.0M"),
+                ("../", "Parent Directory", ""),
+            ],
+        }
+        requested: list[str] = []
+        original = releases._scan_url_page
+
+        def fake_scan_url_page(url: str) -> tuple[list, str]:
+            requested.append(url)
+            return pages[url], ""
+
+        releases._scan_url_page = fake_scan_url_page
+        try:
+            files, status = releases._collect_url(root, "archive", max_depth=2)
+        finally:
+            releases._scan_url_page = original
+
+        self.assertEqual(requested, [root, root + "1.0.0/"])
+        self.assertTrue(status.available)
+        names = [item.name for item in files]
+        self.assertEqual(names, ["apache-alpha-1.0.0-incubating-src.tar.gz"])
+
+    def test_http_session_scans_each_page_once_and_replays_errors(self) -> None:
+        session = releases._HttpSession()
+        calls: list[str] = []
+
+        def fake_uncached(url: str) -> tuple[list, str]:
+            calls.append(url)
+            if url.endswith("missing"):
+                raise releases.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+            return [("a.tar.gz", "a", "")], "text"
+
+        session._scan_page_uncached = fake_uncached  # type: ignore[method-assign]
+        first = session.scan_page("https://example.test/download/")
+        second = session.scan_page("https://example.test/download/")
+        for _ in range(2):
+            with self.assertRaises(releases.HTTPError):
+                session.scan_page("https://example.test/missing")
+
+        self.assertIs(first, second)
+        self.assertEqual(calls, ["https://example.test/download/", "https://example.test/missing"])
+
     def test_collect_files_reports_missing_source_directory(self) -> None:
         with release_dirs() as (dist, archive):
             result = releases.collect_files(
