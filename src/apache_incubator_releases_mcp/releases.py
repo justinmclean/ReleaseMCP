@@ -169,6 +169,9 @@ class _HttpSession:
 
     def __init__(self) -> None:
         self._conns: dict[tuple[str, str, int], http.client.HTTPConnection] = {}
+        # One check reads the release page for discovery, file collection and
+        # page checks; scan each URL once and replay the result, errors included.
+        self._scanned: dict[str, tuple[list[tuple[str, str, str]], str] | Exception] = {}
 
     def _open(self, scheme: str, host: str, port: int) -> http.client.HTTPConnection:
         key = (scheme, host, port)
@@ -230,6 +233,20 @@ class _HttpSession:
         proportional to the number of anchor tags and visible text — not the
         full HTML size.
         """
+        cached = self._scanned.get(url)
+        if isinstance(cached, Exception):
+            raise cached
+        if cached is not None:
+            return cached
+        try:
+            result = self._scan_page_uncached(url)
+        except Exception as exc:
+            self._scanned[url] = exc
+            raise
+        self._scanned[url] = result
+        return result
+
+    def _scan_page_uncached(self, url: str) -> tuple[list[tuple[str, str, str]], str]:
         resp = self._request(url)
         scanner = _HtmlLinkScanner()
         try:
@@ -477,8 +494,18 @@ def _url_error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
-def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = None) -> tuple[list[ReleaseFile], SourceStatus]:
-    seen = seen or set()
+def _collect_url(
+    url: str,
+    source: str,
+    max_depth: int,
+    seen: set[str] | None = None,
+    root: str | None = None,
+) -> tuple[list[ReleaseFile], SourceStatus]:
+    seen = seen if seen is not None else set()
+    # Only directories below the podling's own listing hold its releases.
+    # Listings also link to parents and to other hosts; following those costs
+    # requests and finds nothing.
+    root = root or url
     if url in seen:
         return [], SourceStatus(
             source=source,
@@ -505,8 +532,8 @@ def _collect_url(url: str, source: str, max_depth: int, seen: set[str] | None = 
             continue
         full = urllib.parse.urljoin(url, href)
         if href.endswith("/"):
-            if max_depth > 0:
-                child_files, _ = _collect_url(full, source, max_depth - 1, seen)
+            if max_depth > 0 and full.startswith(root) and full != root:
+                child_files, _ = _collect_url(full, source, max_depth - 1, seen, root)
                 files.extend(child_files)
             continue
         name = urllib.parse.unquote(Path(urllib.parse.urlparse(full).path).name)

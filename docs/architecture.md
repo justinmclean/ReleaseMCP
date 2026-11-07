@@ -27,6 +27,9 @@ subdirectory layout.
 
 The MCP surface is intentionally narrow: callers must provide a single `podling`, and the default traversal only checks
 the podling directory plus one nested version directory level. It does not enumerate all Incubator podlings.
+Only directories below the podling's own listing are followed: parent links and links to other hosts are skipped.
+Within one check, each page is fetched once and its result (or error) reused, so the download page read during
+discovery is not fetched again for file collection or page checks.
 
 ## Parsing Model
 
