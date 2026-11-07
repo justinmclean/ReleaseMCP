@@ -782,9 +782,7 @@ def _release_page_files(podling: str, release_page_url: str) -> tuple[list[Relea
             or link["is_https_downloads_apache"]
         ):
             continue
-        if link["uses_closer_lua"] and not _is_top_level_closer_link(link, slug):
-            pass
-        elif link["uses_closer_lua"]:
+        if link["uses_closer_lua"] and _is_top_level_closer_link(link, slug):
             continue
         file = _release_file_from_link(link, "dist")
         if file is None or file.location in seen:
@@ -815,8 +813,6 @@ def _is_release_page_candidate(
     has_download_text = "download" in text or "release" in text
     has_verification_hint = any(word in text for word in ("checksum", "signature", "pgp", "sha"))
     return has_known_artifact or (has_release_link and (has_download_text or has_verification_hint))
-
-
 
 def discover_release_page_url(podling: str, files: list[ReleaseFile]) -> dict[str, Any]:
     slug = podling_slug(podling)

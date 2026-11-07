@@ -7,6 +7,7 @@ This project intentionally mirrors the lightweight Python layout used by the oth
 - Run tests with `python3 -m unittest discover -s tests -v`.
 - Run the local stdio server with `python3 server.py`.
 - Install for development with `python3 -m pip install -e .[dev]`.
+- Build the skill bundle with `make skill`; the source lives in `skill/incubator-releases/`.
 
 ## Style
 
