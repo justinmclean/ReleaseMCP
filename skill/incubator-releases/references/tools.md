@@ -15,7 +15,7 @@ checks.
 | `podling` | string | Required. Podling id or name. |
 | `dist_base` | string | Optional current release base URL or local release directory. When omitted, the server discovers the podling download page and uses its release links as current distribution evidence. |
 | `archive_base` | string | Optional `archive.apache.org` base URL or local archive directory. Defaults to `https://archive.apache.org/dist/incubator`. |
-| `max_depth` | integer | Optional traversal depth under the podling directory, `0` or `1`. Defaults to `1`. Values above `1` are rejected so checks stay scoped to one podling. |
+| `max_depth` | integer | Optional traversal depth under the podling directory, `0` to `2`. Defaults to `2`, which reaches `<version>/<subproject>/<file>` trees such as Toree's. Values above `2` are rejected so checks stay scoped to one podling. A directory that cannot be read sets that source's `error` in `source_statuses`. |
 | `release_page_url` | string | Optional download page URL or local HTML file. When omitted and `dist_base` is not set, the server tries a bounded list of observed `https://<podling>.apache.org/` download and release page paths. |
 | `include_platforms` | boolean | Optional. When true, fetches GitHub releases, Docker Hub, PyPI, and Maven Central metadata. Defaults to false. |
 | `github_project` | string | Optional `apache/<project>` repository name. Defaults to the podling slug. |

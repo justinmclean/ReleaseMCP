@@ -22,6 +22,13 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(result["source_artifact_count"], 2)
         self.assertEqual(len(result["source_statuses"]), 2)
 
+    def test_max_depth_defaults_to_two_and_is_capped(self) -> None:
+        self.assertEqual(tools.optional_depth(None), 2)
+        self.assertEqual(tools.optional_depth(0), 0)
+        self.assertEqual(tools.optional_depth(2), 2)
+        with self.assertRaisesRegex(ValueError, "between 0 and 2"):
+            tools.optional_depth(3)
+
     def test_tools_registered_with_schemas(self) -> None:
         self.assertIn("podling_releases", tools.TOOLS)
         self.assertEqual(

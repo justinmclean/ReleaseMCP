@@ -246,6 +246,68 @@ class ReleaseParserTests(unittest.TestCase):
         names = [item.name for item in files]
         self.assertEqual(names, ["apache-alpha-1.0.0-incubating-src.tar.gz"])
 
+    def _collect_with_pages(self, root: str, pages: dict, **kwargs):
+        original = releases._scan_url_page
+
+        def fake_scan_url_page(url: str) -> tuple[list, str]:
+            page = pages[url]
+            if isinstance(page, Exception):
+                raise page
+            return page, ""
+
+        releases._scan_url_page = fake_scan_url_page
+        try:
+            return releases._collect_url(root, "archive", **kwargs)
+        finally:
+            releases._scan_url_page = original
+
+    def test_collect_url_reaches_version_subproject_file_by_default(self) -> None:
+        # Toree's layout: 0.5.0-incubating/toree/ and 0.5.0-incubating/toree-pip/.
+        root = "https://archive.example/dist/incubator/toree/"
+        pages = {
+            root: [("0.5.0-incubating/", "0.5.0-incubating/", ""), ("KEYS", "KEYS", "")],
+            root + "0.5.0-incubating/": [
+                ("toree/", "toree/", ""),
+                ("toree-pip/", "toree-pip/", ""),
+            ],
+            root + "0.5.0-incubating/toree/": [("toree-0.5.0-incubating-src.tar.gz", "src", "")],
+            root + "0.5.0-incubating/toree-pip/": [("toree-0.5.0.tar.gz", "pip", "")],
+        }
+        files, status = self._collect_with_pages(root, pages, max_depth=releases.DEFAULT_MAX_DEPTH)
+        names = sorted(item.name for item in files)
+        self.assertEqual(names, ["KEYS", "toree-0.5.0-incubating-src.tar.gz", "toree-0.5.0.tar.gz"])
+        self.assertIsNone(status.error)
+
+    def test_collect_url_reports_an_unreadable_subdirectory(self) -> None:
+        root = "https://archive.example/dist/incubator/alpha/"
+        pages = {
+            root: [("1.0.0/", "1.0.0/", ""), ("2.0.0/", "2.0.0/", "")],
+            root + "1.0.0/": [("apache-alpha-1.0.0-incubating-src.tar.gz", "src", "")],
+            root + "2.0.0/": TimeoutError("timed out"),
+        }
+        files, status = self._collect_with_pages(root, pages, max_depth=2)
+        names = [item.name for item in files]
+        self.assertEqual(names, ["apache-alpha-1.0.0-incubating-src.tar.gz"])
+        self.assertTrue(status.available)
+        self.assertIsNotNone(status.error)
+        self.assertIn("may be incomplete", status.error or "")
+        self.assertIn(root + "2.0.0/", status.error or "")
+
+    def test_version_is_the_release_version_not_the_file_name(self) -> None:
+        cases = {
+            "toree-0.5.0-incubating-src.tar.gz": "0.5.0-incubating",
+            "toree-0.5.0-incubating-src.tar.gz.sha512": "0.5.0-incubating",
+            "toree-0.5.0.tar.gz.asc": "0.5.0",
+            "apache-seata-2.1.0-incubating-src.zip": "2.1.0-incubating",
+            "graphar-v0.13.0-incubating-bin.tgz": "0.13.0-incubating",
+            "apache-foo-1.2.0-rc1-src.tar.gz": "1.2.0-rc1",
+            "foo_1_2_3.tar.gz": "1.2.3",
+            "KEYS": None,
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(releases._version(name), expected)
+
     def test_http_session_scans_each_page_once_and_replays_errors(self) -> None:
         session = releases._HttpSession()
         calls: list[str] = []
