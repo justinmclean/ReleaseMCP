@@ -124,7 +124,7 @@ Arguments:
 - `podling`: podling id or name
 - `dist_base`: optional current release base URL or local release directory; when omitted, the server discovers the podling download page and uses its release links as current distribution evidence
 - `archive_base`: optional `archive.apache.org` base URL or local archive directory
-- `max_depth`: optional traversal depth under the podling directory, `0` to `2`; defaults to `2`, which reaches release trees laid out as `<version>/<subproject>/<file>` (Toree's `0.5.0-incubating/toree/`). A subdirectory that cannot be read is reported in the source's `error` rather than counted as empty
+- `max_depth`: optional traversal depth under the podling directory, `0` to `2`; defaults to `2`, which reaches release trees laid out as `<version>/<subproject>/<file>`. A subdirectory that cannot be read is reported in the source's `error` rather than counted as empty
 - `release_page_url`: optional Apache project release download page URL or local HTML file to inspect; when omitted and
   `dist_base` is not configured, the server tries a bounded list of observed
   `https://<podling>.apache.org/` download/release page paths
